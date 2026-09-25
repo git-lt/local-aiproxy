@@ -22,31 +22,6 @@ function findRootKey(lines: string[], key: string): number {
   return matches[0] ?? -1;
 }
 
-export function restoreRootTomlKeys(current: string, backup: string, keys: string[]): string {
-  const newline = current.includes("\r\n") ? "\r\n" : "\n";
-  const lines = current.match(/.*(?:\r?\n|$)/g)?.filter(Boolean) ?? [];
-  const backupLines = backup.match(/.*(?:\r?\n|$)/g)?.filter(Boolean) ?? [];
-
-  for (const key of keys) {
-    const currentIndex = findRootKey(lines, key);
-    const backupIndex = findRootKey(backupLines, key);
-    if (backupIndex < 0) {
-      if (currentIndex >= 0) lines.splice(currentIndex, 1);
-      continue;
-    }
-
-    const originalLine = backupLines[backupIndex];
-    if (currentIndex >= 0) {
-      lines[currentIndex] = originalLine;
-    } else {
-      const insertAt = rootRange(lines);
-      if (insertAt > 0 && !lines[insertAt - 1].endsWith("\n")) lines[insertAt - 1] += newline;
-      lines.splice(insertAt, 0, originalLine.endsWith("\n") ? originalLine : `${originalLine}${newline}`);
-    }
-  }
-  return lines.join("");
-}
-
 export function readRootTomlString(source: string, key: string): string | undefined {
   const lines = source.match(/.*(?:\r?\n|$)/g)?.filter(Boolean) ?? [];
   const index = findRootKey(lines, key);

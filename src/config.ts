@@ -27,7 +27,7 @@ const PACKAGE_JSON = JSON.parse(fs.readFileSync(
 )) as { version?: unknown };
 
 export const GATEWAY_CONFIG_SCHEMA_URL =
-  "https://raw.githubusercontent.com/aceHubert/codex-cliproxy/main/schemas/gateway-config.schema.json";
+  "https://raw.githubusercontent.com/git-lt/local-aiproxy/main/schemas/gateway-config.schema.json";
 export const GATEWAY_CONFIG_VERSION = String(PACKAGE_JSON.version ?? "unknown");
 
 export function isJsonObject(value: unknown): value is JsonObject {

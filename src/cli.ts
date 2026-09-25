@@ -12,7 +12,7 @@ import {
   migrateLegacyConfig,
 } from "./config.ts";
 import { realPathOrResolve, resolvePaths, managedCatalogFiles, migrateRuntimeHome, LEGACY_STDERR_LOG } from "./paths.ts";
-import { restoreRootTomlKeys, atomicWrite, readRootTomlString } from "./toml.ts";
+import { atomicWrite, readRootTomlString } from "./toml.ts";
 import { startGateway } from "./gateway.ts";
 import { ensureUiToken, isLoopbackHost, startWebUiServer, webUiContextForInstance, webUiPort } from "./webui.ts";
 import { clearPendingRestart, parseMaxLogSize, parseMaxRequestLogs, sanitizeUrlValue } from "./config-update.ts";

@@ -73,9 +73,9 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/aceHubert/codex-cliproxy-gateway.git"
+    "url": "git+https://github.com/git-lt/local-aiproxy.git"
   },
-  "homepage": "https://github.com/aceHubert/codex-cliproxy-gateway#readme",
+  "homepage": "https://github.com/git-lt/local-aiproxy#readme",
   "config": {
     "commitizen": {
       "path": "./node_modules/cz-conventional-changelog-zh"
