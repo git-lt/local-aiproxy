@@ -241,16 +241,16 @@ async function withGateway(
 ): Promise<void> {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "codex-zcode-signing-"));
   const config: GatewayConfig = {
-    host: "127.0.0.1", port: 8320, mountPath: "/v1", prefix: "cliproxy/", zcode: true, upstreamOnly: false,
-    officialBaseUrl: "https://official.invalid/v1", upstreamBaseUrl: "https://cpa.invalid/v1",
+    host: "127.0.0.1", port: 8320, mountPath: "/v1", zcode: true,
+    // 对外模型白名单：缺省一个都不放行，测试里显式全放行。
+    enabledModels: ["*"],
     catalogPath: path.join(directory, "catalog.json"), logDir: path.join(directory, "logs"),
   };
   fs.writeFileSync(config.catalogPath, JSON.stringify({ models: [] }));
   const handshakes: { body: Record<string, unknown>; authorization: string }[] = [];
   const modelCalls: Headers[] = [];
   const currentCache = { get: async () => snapshot(), close: () => {} };
-  const handler = createGatewayHandler(config, "fake-cpa-key", "invalid", new Set<string>(), new Set<string>(),
-    path.join(directory, "models-cache.json"), {
+  const handler = createGatewayHandler(config, {
       planCaches: { "api-key": currentCache } as Partial<Record<ZcodeSelection["kind"], typeof currentCache>>,
       identity: IDENTITY,
       endpointRouting: null,

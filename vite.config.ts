@@ -15,8 +15,8 @@ function envPort(name: string, fallback: number): number {
 }
 
 export default defineConfig(({ command }) => {
-  const devPort = command === "serve" ? envPort("CODEX_CLIPROXY_UI_DEV_PORT", 8322) : 8322;
-  const backendPort = command === "serve" ? envPort("CODEX_CLIPROXY_UI_BACKEND_PORT", 8321) : 8321;
+  const devPort = command === "serve" ? envPort("LOCAL_AIPROXY_UI_DEV_PORT", 8322) : 8322;
+  const backendPort = command === "serve" ? envPort("LOCAL_AIPROXY_UI_BACKEND_PORT", 8321) : 8321;
   if (command === "serve" && devPort === backendPort) {
     throw new Error("Vite dev port and UI backend port must be different");
   }

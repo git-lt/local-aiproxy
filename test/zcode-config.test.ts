@@ -15,9 +15,6 @@ function validConfig(paths: ResolvedPaths): GatewayConfig {
     host: "127.0.0.1",
     port: 8320,
     mountPath: "/v1",
-    prefix: "cliproxy/",
-    officialBaseUrl: "https://chatgpt.com/backend-api/codex",
-    upstreamBaseUrl: "http://127.0.0.1:8317/v1",
     catalogPath: paths.catalogFile,
   };
 }

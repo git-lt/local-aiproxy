@@ -7,9 +7,6 @@
     "host",
     "port",
     "mountPath",
-    "prefix",
-    "officialBaseUrl",
-    "upstreamBaseUrl",
     "catalogPath",
     "configVersion"
   ],
@@ -36,48 +33,52 @@
       "pattern": "^/"
     },
     "prefix": {
-      "type": "string"
+      "description": "已过时，第三方上游前缀路由已移除；命令前置同步会自动删除该键。",
+      "type": "string",
+      "deprecated": true
     },
     "officialBaseUrl": {
+      "description": "已过时，官方 ChatGPT 回落已移除；命令前置同步会自动删除该键。",
       "type": "string",
-      "format": "uri"
+      "format": "uri",
+      "deprecated": true
     },
     "upstreamBaseUrl": {
-      "description": "第三方上游 URL（CLIProxyAPI 或 OpenAI 兼容的 new-api）。",
+      "description": "已过时，第三方上游已移除；命令前置同步会自动删除该键。",
       "type": "string",
-      "format": "uri"
+      "format": "uri",
+      "deprecated": true
     },
     "cliproxyBaseUrl": {
-      "description": "已过时，由 upstreamBaseUrl 取代；命令前置同步会自动把旧值迁移为 upstreamBaseUrl 并移除该键。",
+      "description": "已过时，第三方上游已移除；命令前置同步会自动删除该键。",
       "type": "string",
       "format": "uri",
       "deprecated": true
     },
     "upstreamType": {
-      "description": "第三方上游类型：cliproxy 直接消费其 Codex 目录；newapi 从 OpenAI /models 列表本地合成目录。缺省视为 cliproxy。",
+      "description": "已过时，第三方上游已移除；命令前置同步会自动删除该键。",
       "type": "string",
-      "enum": ["cliproxy", "newapi"]
+      "deprecated": true
     },
     "upstream_type": {
-      "description": "已过时，由 upstreamType 取代；命令前置同步会自动迁移并移除该键。",
+      "description": "已过时，第三方上游已移除；命令前置同步会自动删除该键。",
       "type": "string",
       "deprecated": true
     },
     "catalogPath": {
+      "description": "运行时目录锚点：adapter 用它的目录部分定位自己的目录缓存、models.json 与日志；网关不读写这个路径本身。",
       "type": "string",
       "minLength": 1
     },
     "model_merge_json": {
+      "description": "已过时，第三方上游的覆盖规则已移除；命令前置同步会自动删除该键。",
       "type": "string",
-      "format": "uri"
+      "deprecated": true
     },
     "selectedModels": {
+      "description": "已过时，第三方上游的模型选择已移除；命令前置同步会自动删除该键。",
       "type": "array",
-      "items": {
-        "type": "string",
-        "minLength": 1
-      },
-      "uniqueItems": true
+      "deprecated": true
     },
     "requestLogging": {
       "type": "boolean"
@@ -87,26 +88,27 @@
       "minLength": 1
     },
     "maxRequestLogs": {
-      "description": "整个请求日志目录按修改时间保留的最新文件数，不按路由分组；正在写入的日志（如未结束的 WebSocket 会话文件）不参与裁剪；0 表示不限制。",
+      "description": "整个请求日志目录按修改时间保留的最新文件数，不按路由分组；0 表示不限制。",
       "type": "integer",
       "minimum": 0
     },
     "maxGatewayLogBytes": {
-      "description": "网关进程日志 gateway.log 与 gateway.error.log 的最大字节数；超限时当前内容复制为时间戳备份（每个文件保留最新 5 个）并原地清空活跃文件，进程持有的句柄继续有效；设置上限同时约束 gateway.log 中配置审计的可追溯深度；0 表示不限制。",
+      "description": "网关进程日志 gateway.log 的最大字节数；超限时当前内容复制为时间戳备份（保留最新 5 个）并原地清空活跃文件，进程持有的句柄继续有效；设置上限同时约束 gateway.log 中配置审计的可追溯深度；0 表示不限制。",
       "type": "integer",
       "minimum": 0
     },
     "upstreamOnly": {
-      "description": "是否只使用第三方上游并纯转发模型名，不添加 cliproxy/ 前缀。",
-      "type": "boolean"
+      "description": "已过时，第三方上游与 upstream-only 模式已移除；命令前置同步会自动删除该键。",
+      "type": "boolean",
+      "deprecated": true
     },
     "zcode": {
-      "description": "是否启用 ZCode Responses 入口；默认关闭。upstreamOnly 为 true 时该入口按禁用处理（开关保留但不生效）。",
+      "description": "是否启用 ZCode Responses 入口；默认关闭。",
       "type": "boolean",
       "default": false
     },
     "codebuddy": {
-      "description": "是否启用 CodeBuddy/WorkBuddy Responses 入口；默认关闭。upstreamOnly 为 true 时该入口按禁用处理（开关保留但不生效）。",
+      "description": "是否启用 CodeBuddy/WorkBuddy Responses 入口；默认关闭。",
       "type": "boolean",
       "default": false
     },
@@ -116,8 +118,23 @@
       "enum": ["auto", "cn", "intl"],
       "default": "auto"
     },
+    "cline": {
+      "description": "是否启用 Cline 官方 API（cline/ 前缀）入口；默认关闭。凭据为运行时目录下的 cline-api-key 文件（0600，单行）。",
+      "type": "boolean",
+      "default": false
+    },
+    "qodercn": {
+      "description": "是否启用 QoderCN 远端 API 入口（qodercn/ 前缀）；默认关闭。凭据为本机 QoderCN/通义灵码客户端的登录缓存，网关只读。",
+      "type": "boolean",
+      "default": false
+    },
+    "enabledModels": {
+      "description": "对外模型白名单（slug，匹配不区分大小写，`*` 表示全部放行）：/v1/models 只展示名单内的模型，转发请求同理；缺省或空数组表示全部模型开关关闭（一个都不放行）。",
+      "type": "array",
+      "items": { "type": "string" }
+    },
     "cpaOnly": {
-      "description": "已过时，由 upstreamOnly 取代；命令前置同步会自动迁移并移除该键。",
+      "description": "已过时，第三方上游已移除；命令前置同步会自动删除该键。",
       "type": "boolean",
       "deprecated": true
     }

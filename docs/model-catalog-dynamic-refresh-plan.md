@@ -1,5 +1,12 @@
 # Codex 动态目录与 CPA-only 静态目录方案
 
+> **2026-09-23 变更**：网关已彻底移除对 `$CODEX_HOME` 的读写（`config.toml` 与 Codex 的
+> `models_cache.json` 都只在测试里被断言「未被触碰」）。因此本文中「增删受管
+> `model_catalog_json`」「非受管值守卫」「卸载恢复受管键」「失效 Codex 目录缓存」
+> 等设计**已不再实现**；`--restart-codex` 也已移除。现在 `models --sync`
+> 只重建网关自己的目录文件与 `config.json`。目录重建与模式切换（`upstreamOnly`、
+> `catalogPath`）逻辑仍然有效。
+
 ## 实施状态
 
 2026-08-27 将原官方合并静态模式替换为 CPA-only 静态目录；官方目录不再由 gateway 落盘缓存。
@@ -17,7 +24,7 @@ Codex Desktop runtime 版本不一致时，用它生成的 native rows 可能落
 2. 官方目录每次 `/v1/models` 请求实时获取，不由 gateway 落盘。
 3. CLIProxy 模型只由 `models --sync` 拉取和选择，不在 `/v1/models` 中实时请求。
 4. `models --sync --cpa-only` 生成只含 CPA 原始模型 ID 的静态 catalog，并切换到 CPA-only 路由。
-5. 普通 `models --sync` 删除受管静态配置，切回动态 split 路由。
+5. 普通 `models --sync` 切回动态 split 路由。
 
 > 2026-08-30 语义更新：路由模式只由 `models --sync [--cpa-only]` 的 flag 显式选择；
 `config` 命令仅保留设置打印与 `--log on|off`，不再承担模式切换。CPA Responses
@@ -28,8 +35,9 @@ WebSocket 无网关侧开关，一律桥接 CLIProxy、由上游按请求判断�
 - `models --sync --cpa-only` 从 split 切换到 CPA-only，或普通 `models --sync` 从
   CPA-only 切回 split 时，CLI 会自动重启网关。同一模式内重新同步目录或
   模型选择不重启网关。
-- 模式切换会增删 `model_catalog_json`，Codex app-server 需要重新加载才能切换
-  模型管理器。需要立即生效时使用 `--restart-codex`，或者手动重启 Codex。
+- 模式切换会改变网关侧的目录路径与 `upstreamOnly`；Codex 侧是否重新加载
+  `model_catalog_json` 由用户自己负责——网关不再改写 `config.toml`。需要立即生效时
+  完全退出并重新打开 Codex。
 - CPA-only 中的静态目录更新后，已运行的 Codex app-server 不会自动重读；
   split 模式会周期请求 `/v1/models`，但已打开的选择器仍可能持有旧快照。
 - 手工修改 `config.json` 或 `config.toml` 不在 CLI 自动处理范围内，也不会触发
@@ -83,9 +91,10 @@ GET /v1/models?client_version=0.148.0
 2. 请求 CLIProxy /models
 3. 用户确认选择
 4. 生成只包含原始 CPA rows 的 runtime catalog
-5. 删除受管 model_catalog_json
-6. 保留 models_cache.json.models，仅把 fetched_at 和 client_version 置为失效
 ```
+
+（2026-09-23 起不再有「删除受管 model_catalog_json」与「失效 Codex models_cache.json」
+这两步：网关对 `$CODEX_HOME` 是绝对零写入，Codex 侧目录变化靠它自己的 TTL／worker 自愈。）
 
 如果此前处于 CPA-only 模式，网关会自动重启；Codex 仍需按上述要求重新加载
 app-server，之后才会继续周期刷新 `/models`。
@@ -96,14 +105,15 @@ app-server，之后才会继续周期刷新 `/models`。
 1. 请求 CLIProxy /models 并确认非空选择
 2. 应用 models.json 元数据覆盖，不读取或合并官方 rows
 3. 保留 CPA 原始模型 ID，原子写 ~/.codex-cliproxy-gateway/cliproxy-catalog.json
-4. 写入 model_catalog_json = "~/.codex-cliproxy-gateway/cliproxy-catalog.json"
-5. 设置 cpaOnly=true；仅在模式实际变化时自动重启网关
-6. 可加 --restart-codex 停止旧 Codex app-server，让新进程重读静态目录
+4. 设置 upstreamOnly=true；仅在模式实际变化时自动重启网关
 ```
 
-CPA-only 不依赖官方目录，并直接使用两个模式共用的 runtime catalog。目录只因人工同步而变化；普通 `models --sync`
-切回 split 时删除受管 `model_catalog_json` 并失效 Codex 动态 cache。模式切换伴随的配置变更都会审计到
-`logs/cliproxy-config-*.log`（URL query 脱敏）。
+（2026-09-23 起不再写 `model_catalog_json`、不再有 `--restart-codex`；
+用户需要自己把 `model_catalog_json` 指向该目录文件并重启 Codex。）
+
+CPA-only 不依赖官方目录，并直接使用两个模式共用的 runtime catalog。目录只因人工同步而变化；
+普通 `models --sync` 切回 split 时只改网关自己的 `config.json` 与目录文件。模式切换伴随的
+配置变更都会审计到 `logs/cliproxy-config-*.log`（URL query 脱敏）。
 
 ## 失败与安全边界
 
@@ -111,10 +121,9 @@ CPA-only 不依赖官方目录，并直接使用两个模式共用的 runtime ca
 - CPA catalog 缺失、损坏或合并失败时，`/v1/models` 只返回官方目录。
 - 官方目录 fallback 只保证目录可用；`cpaOnly=true` 时推理请求仍然转发 CPA。
 - CPA-only 不得混入官方模型或 `cliproxy/` 路由前缀。
-- 非本工具管理的 `model_catalog_json` 不得被覆盖或删除。
 - OAuth、API key 与 `ChatGPT-Account-ID` 在请求日志中必须遮蔽。
-- `--restart-codex` 只停止 Codex app-server，不重启网关，也不主动启动替代进程；
-  启用或退出 CPA-only 时需要它或手动重启 Codex。
+- 网关不得读写 `$CODEX_HOME` 下的任何文件：`models --sync` 之后 `config.toml` 与
+  `models_cache.json` 都必须逐字节未变。
 
 ## 测试清单
 
@@ -123,9 +132,8 @@ CPA-only 不依赖官方目录，并直接使用两个模式共用的 runtime ca
 3. 官方失败返回 `502`。
 4. 动态返回官方 native rows 与选择的 CLIProxy rows，并重新计算 routed priority。
 5. 不带 `client_version` 返回 OpenAI list shape 且同样实时请求官方。
-6. `--cpa-only` 写纯 CPA 静态 catalog、`model_catalog_json` 并置 cpaOnly=true。
-7. 单引号 literal string 的 `model_catalog_json` 同样参与非受管守卫；值不可解析时显式报错。
-8. 普通 sync 删除 CPA-only 静态配置、失效 Codex cache 并置 cpaOnly=false。
+6. `--cpa-only` 写纯 CPA 静态 catalog 并置 `upstreamOnly=true`。
+7. 普通 sync 置 `upstreamOnly=false`；全过程 `config.toml` 与 `models_cache.json` 逐字节未变。
 9. runtime 不生成官方目录 cache，并保留非托管文件。
 
 ## 结论

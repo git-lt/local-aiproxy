@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { createGatewayHandler, isZcodeResponsesWebSocket, responsesWebSocketTarget } from "../src/gateway.ts";
+import { createGatewayHandler, isZcodeResponsesWebSocket } from "../src/gateway.ts";
 import { ZcodeConfigError, type ZcodeProviderSnapshot, type ZcodeFamily, type ZcodeSelection } from "../src/zcode/config.ts";
 import { ZcodeEndpointRouting } from "../src/zcode/endpoint-routing.ts";
 import type { ZcodeIdentity } from "../src/zcode/request-context.ts";
@@ -51,28 +51,25 @@ async function decoded(response: Response): Promise<Json> {
   return final.response;
 }
 async function fixture(run: (context: {
-  config: GatewayConfig; directory: string; cacheFile: string;
-  create: (options?: { current?: () => Promise<Snapshot>; currentPlan?: ZcodeSelection["kind"]; fetch?: (url: string, init: RequestInit) => Promise<Response>; sticky?: boolean; onClose?: () => void; codexModelsCacheFile?: string; endpointRouting?: ZcodeEndpointRouting | null; planCaches?: Partial<Record<ZcodeSelection["kind"], { get: () => Promise<Snapshot>; close: () => void }>>; zcodeHome?: string }) => ReturnType<typeof createGatewayHandler>;
+  config: GatewayConfig; directory: string;
+  create: (options?: { current?: () => Promise<Snapshot>; currentPlan?: ZcodeSelection["kind"]; fetch?: (url: string, init: RequestInit) => Promise<Response>; onClose?: () => void; endpointRouting?: ZcodeEndpointRouting | null; planCaches?: Partial<Record<ZcodeSelection["kind"], { get: () => Promise<Snapshot>; close: () => void }>>; zcodeHome?: string }) => ReturnType<typeof createGatewayHandler>;
 }) => Promise<void>): Promise<void> {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "codex-zcode-gateway-"));
   const config: GatewayConfig = {
-    host: "127.0.0.1", port: 8320, mountPath: "/v1", prefix: "cliproxy/", zcode: true, upstreamOnly: false,
-    officialBaseUrl: "https://official.invalid/v1", upstreamBaseUrl: "https://cpa.invalid/v1",
+    host: "127.0.0.1", port: 8320, mountPath: "/v1", zcode: true, enabledModels: ["*"],
     catalogPath: path.join(directory, "catalog.json"), logDir: path.join(directory, "logs"),
   };
   fs.writeFileSync(config.catalogPath, JSON.stringify({ models: [{ slug: "test-cpa", priority: 0 }] }));
-  const cacheFile = path.join(directory, "models-cache.json");
   const handlers: ReturnType<typeof createGatewayHandler>[] = [];
   const originalFetch = globalThis.fetch;
-  // 官方 /models 刷新是目录合成的正常依赖；其余未模拟的网络请求仍然拒绝。
-  globalThis.fetch = (async (input: string | URL | Request) => {
-    if (String(input).includes("/models")) return Response.json({ models: [{ slug: "gpt-native", priority: 0 }] });
+  // 测试不发任何真实网络请求：上游调用一律由 deps.fetch 注入，其余请求直接拒绝。
+  globalThis.fetch = (async () => {
     throw new Error("测试禁止未模拟的网络请求");
   }) as unknown as typeof fetch;
   try {
-    await run({ config, directory, cacheFile, create(options = {}) {
+    await run({ config, directory, create(options = {}) {
       const currentCache = { get: options.current ?? (async () => snapshot()), close: options.onClose ?? (() => {}) };
-      const handler = createGatewayHandler(config, "fake-cpa-key", "invalid", new Set(options.sticky ? ["sticky-thread"] : []), new Set<string>(), cacheFile, {
+      const handler = createGatewayHandler(config, {
         ...(options.zcodeHome
           ? { zcodeHome: options.zcodeHome }
           : options.planCaches
@@ -81,7 +78,6 @@ async function fixture(run: (context: {
             ? { planCaches: { [options.currentPlan]: currentCache } as Partial<Record<ZcodeSelection["kind"], typeof currentCache>> }
             : { configCache: currentCache }),
         fetch: options.fetch ?? (async () => upstream()),
-        ...(options.codexModelsCacheFile ? { codexModelsCacheFile: options.codexModelsCacheFile } : {}),
         // 默认禁用端点重映射：既有用例断言上游 URL 与调用次数，重映射行为由专属用例覆盖。
         endpointRouting: options.endpointRouting ?? null,
       });
@@ -96,42 +92,40 @@ async function fixture(run: (context: {
 }
 
 for (const family of ["zai", "bigmodel"] as const) {
-  for (const mode of ["split", "CPA 粘性"] as const) {
-    test(`ZCode ${family} 在 ${mode} 模式优先路由并完成文本与工具请求`, async () => {
-      await fixture(async ({ create }) => {
-        const selected = snapshot(family);
-        const calls: { url: string; init: RequestInit; body: Json }[] = [];
-        const handler = create({ current: async () => selected, sticky: mode === "CPA 粘性", fetch: async (url, init) => {
-          const body = JSON.parse(String(init.body));
-          calls.push({ url, init, body });
-          return upstream("成功", body.tools?.[0]?.name);
-        } });
-        const model = "zcode/glm-5.3";
-        for (const stream of [false, true]) {
-          const response = await handler(request(model, { stream, tools: [{ type: "function", name: "read.file", parameters: { type: "object", properties: { path: { type: "string" } } } }] }, "/v1/responses", { "thread-id": "sticky-thread" }));
-          assert.equal(response.status, 200);
-          const result = await decoded(response);
-          assert.equal(result.model, model);
-          assert.equal(result.output[0].content[0].text, "成功");
-          assert.equal(result.output[1].name, "read.file");
-          assert.equal(result.output[1].call_id, "call_fixture");
-          assert.deepEqual(JSON.parse(result.output[1].arguments), { path: "中文.txt" });
-        }
-        assert.equal(calls.length, 2);
-        for (const call of calls) {
-          assert.equal(call.url, `${selected.baseURL}/v1/messages`);
-          assert.equal(call.body.model, "GLM-5.3");
-          assert.equal(call.body.stream, true);
-          const headers = new Headers(call.init.headers);
-          assert.equal(headers.get("authorization"), `Bearer ${FAKE_KEY}`);
-          assert.equal(headers.get("x-api-key"), FAKE_KEY);
-          assert.equal(headers.get("chatgpt-account-id"), null);
-          headers.forEach((value) => assert.ok(!value.includes(FAKE_OAUTH)));
-          assert.equal(call.init.redirect, "manual");
-        }
-      });
+  test(`ZCode ${family} 完成文本与工具请求并剥离客户端凭据`, async () => {
+    await fixture(async ({ create }) => {
+      const selected = snapshot(family);
+      const calls: { url: string; init: RequestInit; body: Json }[] = [];
+      const handler = create({ current: async () => selected, fetch: async (url, init) => {
+        const body = JSON.parse(String(init.body));
+        calls.push({ url, init, body });
+        return upstream("成功", body.tools?.[0]?.name);
+      } });
+      const model = "zcode/glm-5.3";
+      for (const stream of [false, true]) {
+        const response = await handler(request(model, { stream, tools: [{ type: "function", name: "read.file", parameters: { type: "object", properties: { path: { type: "string" } } } }] }));
+        assert.equal(response.status, 200);
+        const result = await decoded(response);
+        assert.equal(result.model, model);
+        assert.equal(result.output[0].content[0].text, "成功");
+        assert.equal(result.output[1].name, "read.file");
+        assert.equal(result.output[1].call_id, "call_fixture");
+        assert.deepEqual(JSON.parse(result.output[1].arguments), { path: "中文.txt" });
+      }
+      assert.equal(calls.length, 2);
+      for (const call of calls) {
+        assert.equal(call.url, `${selected.baseURL}/v1/messages`);
+        assert.equal(call.body.model, "GLM-5.3");
+        assert.equal(call.body.stream, true);
+        const headers = new Headers(call.init.headers);
+        assert.equal(headers.get("authorization"), `Bearer ${FAKE_KEY}`);
+        assert.equal(headers.get("x-api-key"), FAKE_KEY);
+        assert.equal(headers.get("chatgpt-account-id"), null);
+        headers.forEach((value) => assert.ok(!value.includes(FAKE_OAUTH)));
+        assert.equal(call.init.redirect, "manual");
+      }
     });
-  }
+  });
 }
 
 test("端点重映射命中时上游请求改发 ultra 地址，配置拉取走独立通道", async () => {
@@ -157,57 +151,6 @@ test("端点重映射命中时上游请求改发 ultra 地址，配置拉取走�
     }
     assert.equal(configCalls, 1, "TTL 内只拉取一次映射表");
     assert.deepEqual(upstreamUrls, Array(2).fill("https://zcode.z.ai/api/v1/ultra-zai/anthropic/v1/messages"));
-  });
-});
-
-test("upstream-only 下 ZCode 按禁用处理：保留上游裸条目并直通第三方上游", async () => {
-  const originalFetch = globalThis.fetch;
-  try {
-    await fixture(async ({ config, create, directory }) => {
-      config.upstreamOnly = true;
-      // 上游目录是裸 slug，upstream-only 直接对外暴露它们。
-      fs.writeFileSync(config.catalogPath, JSON.stringify({ models: [
-        { slug: "test-cpa", priority: 0 }, { slug: "z.ai/glm-5.3", priority: 1 },
-      ] }));
-      const passthrough: string[] = [];
-      globalThis.fetch = (async (input: string | URL | Request) => {
-        passthrough.push(String(input));
-        return new Response("", { status: 200 });
-      }) as unknown as typeof fetch;
-      let reads = 0;
-      let zcodeCalls = 0;
-      const handler = create({
-        current: async () => { reads++; return snapshot(); },
-        fetch: async () => { zcodeCalls++; return upstream(); },
-      });
-
-      // 坏配置也不影响目录：上游的裸 z.ai 条目既不被剥离也不被替换成 ZCode 目录。
-      const list = await (await handler(new Request("http://127.0.0.1:8320/v1/models"))).json() as Json;
-      const zai = list.data.filter((item: Json) => item.id === "z.ai/glm-5.3");
-      assert.equal(zai.length, 1);
-      assert.equal(zai[0].owned_by, "cliproxy");
-      assert.ok(list.data.some((item: Json) => item.id === "test-cpa"));
-
-      // 请求交给 upstream-only 直通，不落到 ZCode 的 Anthropic 适配器。
-      const response = await handler(request("z.ai/glm-5.3"));
-      assert.equal(response.status, 200);
-      assert.equal(zcodeCalls, 0);
-      assert.equal(passthrough.length, 1);
-      assert.match(passthrough[0]!, /^https:\/\/cpa\.invalid\/v1\/responses/);
-
-      // 禁用意味着不建凭证缓存、也不写厂商目录文件。
-      assert.equal(reads, 0);
-      assert.equal(fs.existsSync(path.join(directory, "zcode-catalog.json")), false);
-    });
-  } finally { globalThis.fetch = originalFetch; }
-});
-
-test("upstream-only 下 ZCode 的环回监听与保留前缀约束不再生效", async () => {
-  await fixture(async ({ config, create }) => {
-    config.upstreamOnly = true;
-    config.host = "0.0.0.0";
-    config.prefix = "zcode/";
-    assert.doesNotThrow(() => create());
   });
 });
 
@@ -276,29 +219,6 @@ test("ZCode 关闭或配置失效时不注入模型，失效请求不触发上�
     assert.equal((await invalid(request("zcode/glm-5.3"))).status, 503);
     assert.equal(calls, 0);
   });
-});
-
-test("ZCode 目录不污染官方 last-good 缓存且官方失败仍叠加当前套餐", async () => {
-  const originalFetch = globalThis.fetch;
-  try {
-    let failed = false;
-    await fixture(async ({ config, create, cacheFile }) => {
-      globalThis.fetch = (async () => { if (failed) throw new Error("离线"); return Response.json({ models: [{ slug: "gpt-native", priority: 0 }] }); }) as unknown as typeof fetch;
-      config.upstreamOnly = false;
-      let selected = snapshot();
-      const handler = create({ current: async () => selected });
-      const list = async () => await (await handler(new Request("http://127.0.0.1:8320/v1/models?client_version=0.145.0"))).json() as Json;
-      const first = await list();
-      assert.ok(first.models.some((item: Json) => item.slug === "zcode-zai-test/glm-5.3"));
-      assert.deepEqual(JSON.parse(fs.readFileSync(cacheFile, "utf8")).models.map((item: Json) => item.slug), ["gpt-native"]);
-      failed = true;
-      selected = { ...selected, modelIds: ["glm-5.3-flash"] };
-      const second = await list();
-      assert.ok(second.models.some((item: Json) => item.slug === "gpt-native"));
-      assert.ok(!second.models.some((item: Json) => item.slug === "zcode-zai-test/glm-5.3"));
-      assert.deepEqual(JSON.parse(fs.readFileSync(cacheFile, "utf8")).models.map((item: Json) => item.slug), ["gpt-native"]);
-    });
-  } finally { globalThis.fetch = originalFetch; }
 });
 
 test("ZCode 拒绝 WebSocket 并移除旧 zai 路径，均不访问上游", async () => {
@@ -574,30 +494,6 @@ test("ZCode 历史 function 与 custom 调用在压缩移除 tools 后仍可生�
 });
 
 
-test("ZCode WebSocket 降级仅作用于明确模型的 Responses，不影响 Realtime 或无提示旧路由", async () => {
-  await fixture(async ({ config }) => {
-    // 先按 upstream-only 校验无提示请求仍然直通第三方上游。
-    config.upstreamOnly = true;
-    for (const route of ["/v1/live/rtc_fixture", "/v1/realtime?model=gpt-live"]) {
-      for (const hint of [undefined, "model=zcode/glm-5.3"]) {
-        const headers = new Headers({ upgrade: "websocket" });
-        if (hint) headers.set("x-codex-routing-hint", hint);
-        assert.equal(isZcodeResponsesWebSocket(new Request(`http://localhost${route}`, { headers }), config), false);
-      }
-    }
-    const bare = new Request("http://localhost/v1/responses", { headers: { upgrade: "websocket" } });
-    assert.equal(isZcodeResponsesWebSocket(bare, config), false);
-    assert.equal(responsesWebSocketTarget(bare, config, "test-key")?.routeKind, "cliproxy");
-    config.upstreamOnly = false;
-    assert.equal(responsesWebSocketTarget(bare, config, "test-key")?.routeKind, "official");
-    const known = new Request("http://localhost/v1/responses", {
-      headers: { upgrade: "websocket", "x-codex-routing-hint": "model=zcode/glm-5.3" },
-    });
-    assert.equal(isZcodeResponsesWebSocket(known, config), true);
-    assert.equal(responsesWebSocketTarget(known, config, "test-key"), null);
-  });
-});
-
 test("ZCode 请求日志沿用缺省日志目录", async () => {
   await fixture(async ({ config, directory, create }) => {
     config.requestLogging = true;
@@ -676,74 +572,44 @@ for (const family of ["zai", "bigmodel"] as const) {
   }
 }
 
-test("ZCode 对外目录变化时过期 Codex 目录缓存，未变化时保持原样", async () => {
+test("ZCode 目录变化与解析失败都不写 Codex 的 models_cache.json", async () => {
   await fixture(async ({ config, create }) => {
     const codexCache = path.join(path.dirname(config.catalogPath), "codex-models-cache.json");
     const file = path.join(path.dirname(config.catalogPath), "zcode-catalog.json");
-    const read = () => JSON.parse(fs.readFileSync(codexCache, "utf8")) as {
-      fetched_at: string; client_version: string; models: { slug: string }[];
+    // 网关对 ~/.codex 绝对零写入：这份 Codex 目录缓存从头到尾必须逐字节不变。
+    const seededCache = `${JSON.stringify({
+      fetched_at: "2026-09-12T09:37:23Z",
+      client_version: "0.154.0",
+      models: [{ slug: "gpt-test" }, { slug: "zcode-zai-test/glm-5.3" }],
+    })}\n`;
+    const assertCodexCacheUntouched = () => {
+      assert.equal(fs.readFileSync(codexCache, "utf8"), seededCache, "网关不得写 Codex 的 models_cache.json");
     };
-    const seedCache = (fetchedAt: string) => fs.writeFileSync(codexCache, JSON.stringify({
-      fetched_at: fetchedAt, client_version: "0.154.0", models: [{ slug: "gpt-test" }, { slug: "zcode-zai-test/glm-5.3" }],
-    }));
-    // 启动首读是 fire-and-forget：等待对外目录与 Codex 缓存都收敛，避免与断言竞态。
-    const settle = async (expected: string[], cachePruned: boolean) => {
+    // 启动首读是 fire-and-forget：等待对外目录收敛，避免与断言竞态。
+    const settle = async (expected: string[]) => {
       for (let i = 0; i < 200; i++) {
         try {
           const served = JSON.parse(fs.readFileSync(file, "utf8")) as { models: { slug: string }[] };
-          if (JSON.stringify(served.models.map((model) => model.slug)) === JSON.stringify(expected)
-            && (!cachePruned
-              || !read().models.some((model) => model.slug.startsWith("zcode-") && !expected.includes(model.slug)))) return;
+          if (JSON.stringify(served.models.map((model) => model.slug)) === JSON.stringify(expected)) return;
         } catch { /* 尚未落盘。 */ }
         await new Promise((done) => setTimeout(done, 5));
       }
       throw new Error(`对外目录未在预期时间内落定为 ${JSON.stringify(expected)}`);
     };
 
-    // 首次启动落盘当前套餐目录：内容变化必须让 Codex 重新拉取。
-    seedCache("2026-09-12T09:37:23Z");
-    const first = create({ current: async () => ({ ...snapshot(), modelIds: ["GLM-5.3-Flash"] }), codexModelsCacheFile: codexCache });
-    await settle(["zcode-zai-test/glm-5.3-flash"], true);
+    // 首次启动落盘当前套餐目录。
+    fs.writeFileSync(codexCache, seededCache);
+    const first = create({ current: async () => ({ ...snapshot(), modelIds: ["GLM-5.3-Flash"] }) });
+    await settle(["zcode-zai-test/glm-5.3-flash"]);
     first.close();
-    assert.equal(read().fetched_at, "2000-01-01T00:00:00Z");
-    assert.equal(read().client_version, "0.0.0");
-    assert.deepEqual(read().models.map((model) => model.slug), ["gpt-test"], "旧套餐 ZCode 条目被撤下");
+    assertCodexCacheUntouched();
 
-    // 相同套餐再次启动：对外目录内容不变，不得再次改写 Codex 缓存。
-    seedCache("2026-09-12T10:00:00Z");
-    const second = create({ current: async () => ({ ...snapshot(), modelIds: ["GLM-5.3-Flash"] }), codexModelsCacheFile: codexCache });
-    await settle(["zcode-zai-test/glm-5.3-flash"], false);
-    second.close();
-    assert.equal(read().fetched_at, "2026-09-12T10:00:00Z");
-  });
-});
-
-test("ZCode 套餐变化或解析失败时立即撤下 Codex 缓存中的旧模型", async () => {
-  await fixture(async ({ config, create }) => {
-    const codexCache = path.join(path.dirname(config.catalogPath), "codex-models-cache.json");
-    const read = () => JSON.parse(fs.readFileSync(codexCache, "utf8")) as {
-      fetched_at: string; client_version: string; models: { slug: string }[];
-    };
-    const seed = () => fs.writeFileSync(codexCache, JSON.stringify({
-      fetched_at: "2026-09-12T09:37:23Z", client_version: "0.155.0",
-      models: [{ slug: "gpt-keep" }, { slug: "zcode-zai-test/glm-5.3" }, { slug: "zcode-zai-test/glm-5.3-flash" }],
-    }));
-
-    // 套餐切到只支持 glm-5.3-flash：旧套餐的 zcode/glm-5.3 必须立即从 Codex 缓存撤下。
-    seed();
-    let selected = { ...snapshot(), modelIds: ["GLM-5.3-Flash"] };
-    const handler = create({ current: async () => selected, codexModelsCacheFile: codexCache });
-    const list = await (await handler(new Request("http://127.0.0.1:8320/v1/models"))).json() as Json;
-    assert.deepEqual(list.data.filter((item: Json) => item.id.startsWith("zcode-")).map((item: Json) => item.id), ["zcode-zai-test/glm-5.3-flash"]);
-    assert.deepEqual(read().models.map((model) => model.slug), ["gpt-keep", "zcode-zai-test/glm-5.3-flash"]);
-    assert.equal(read().fetched_at, "2000-01-01T00:00:00Z");
-
-    // 配置解析失败：当前所有 ZCode 条目都必须撤下，非 ZCode 条目保持不动。
-    seed();
-    const invalid = create({ current: async () => { throw new ZcodeConfigError("测试配置无效"); }, codexModelsCacheFile: codexCache });
+    // 配置解析失败：ZCode 条目从对外目录撤下，但 Codex 的缓存依然不动。
+    fs.writeFileSync(codexCache, seededCache);
+    const invalid = create({ current: async () => { throw new ZcodeConfigError("测试配置无效"); } });
     const invalidList = await (await invalid(new Request("http://127.0.0.1:8320/v1/models"))).json() as Json;
     assert.ok(invalidList.data.every((item: Json) => !item.id.startsWith("zcode/")));
-    assert.deepEqual(read().models.map((model) => model.slug), ["gpt-keep"]);
+    assertCodexCacheUntouched();
   });
 });
 
@@ -951,16 +817,5 @@ test("多个官方 API Key 按 providerId 前缀独立路由与鉴权", async ()
     assert.deepEqual(await apiIds(), ["zcode-zai-api/glm-5.3", "zcode-custom-official/glm-5.3-flash", "zcode-late-official/glm-5.3"]);
     assert.equal((await handler(request("zcode-late-official/glm-5.3"))).status, 200);
     assert.equal(calls.at(-1)!.headers.get("x-api-key"), "fake-late-key");
-  });
-});
-
-test("启用 ZCode 时 zcode- 套餐段前缀同样保留，第三方 prefix 冲突直接报错", async () => {
-  await fixture(async ({ config, create }) => {
-    config.prefix = "zcode-team-coding-plan/";
-    assert.throws(() => create());
-    config.prefix = "zcode-";
-    assert.throws(() => create());
-    config.prefix = "cliproxy/";
-    assert.doesNotThrow(() => create());
   });
 });

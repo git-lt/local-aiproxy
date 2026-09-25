@@ -3,7 +3,7 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import codexClientModels from "../../models/codex_client_models.json";
 import { atomicWrite } from "../toml.ts";
-import { invalidateModelsCache, parseCodexCatalog } from "../catalog.ts";
+import { parseCodexCatalog } from "../catalog.ts";
 import type { ModelCatalog, ModelEntry } from "../types.ts";
 import type { CodebuddyCredential, CodebuddyProfile } from "./credentials.ts";
 import { profileProduct, profileRegion } from "./credentials.ts";
@@ -362,8 +362,6 @@ export interface CodebuddyCatalogStoreOptions {
   /** 每个可用产品接口的凭据清单（按前缀产品选出的接口凭据，含同地域回退）。 */
   credentials: () => Promise<CodebuddyCredential[]>;
   fetch?: (url: string, init: RequestInit) => Promise<Response>;
-  /** Codex 自己的目录缓存；目录内容变化时过期它，让 Codex 重新拉取 /models。 */
-  codexModelsCacheFile?: string;
   now?: () => number;
   ttlMs?: number;
 }
@@ -418,7 +416,7 @@ export function createCodebuddyCatalogStore(options: CodebuddyCatalogStoreOption
     } catch { /* 缺失或损坏的缓存按未命中处理。 */ }
   }
 
-  function writeDisk(profile: CodebuddyProfile, value: CachedCatalog, sourceHash: string, previous: ModelEntry[] | undefined): void {
+  function writeDisk(profile: CodebuddyProfile, value: CachedCatalog, sourceHash: string): void {
     try {
       atomicWrite(cacheFile(profile), `${JSON.stringify({
         cache_key: value.key,
@@ -428,10 +426,6 @@ export function createCodebuddyCatalogStore(options: CodebuddyCatalogStoreOption
         models: value.models,
       }, null, 2)}\n`);
     } catch { /* 缓存写失败不影响本次目录返回。 */ }
-    if (previous === undefined || digest(previous) !== digest(value.models)) {
-      // 目录内容变化会改变 Codex 能看到的模型列表：过期它自己的目录缓存。
-      if (options.codexModelsCacheFile) invalidateModelsCache(options.codexModelsCacheFile);
-    }
   }
 
   async function fetchUpstreamCatalog(credential: CodebuddyCredential): Promise<ModelEntry[]> {
@@ -469,10 +463,9 @@ export function createCodebuddyCatalogStore(options: CodebuddyCatalogStoreOption
     for (const { credential, key, profile } of targets) {
       try {
         const models = await fetchUpstreamCatalog(credential);
-        const previous = cached.get(profile)?.key === key ? cached.get(profile)!.models : undefined;
         cached.set(profile, { key, fetchedAt: now(), models });
         retryAt.delete(profile);
-        writeDisk(profile, cached.get(profile)!, digest({ key, revision: catalogRevision(profile) }), previous);
+        writeDisk(profile, cached.get(profile)!, digest({ key, revision: catalogRevision(profile) }));
       } catch {
         // 拉取失败回退该接口的 last-good（允许陈旧）；完全无缓存的接口跳过其目录族。
         retryAt.set(profile, now() + CATALOG_FAILURE_COOLDOWN_MS);

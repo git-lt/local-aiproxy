@@ -1,7 +1,10 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import type { ResolvedPaths, UpstreamType } from "./types.ts";
+import type { ResolvedPaths } from "./types.ts";
+
+/** 改名前的运行时目录名：`local-aiproxy` 之前的安装落在它下面。 */
+export const LEGACY_RUNTIME_HOME_DIR = ".codex-cliproxy-gateway";
 
 /**
  * 解析到真实路径（穿透符号链接）；目标不存在时解析父目录再拼 basename，
@@ -37,7 +40,7 @@ export const LEGACY_STDERR_LOG = "gateway.error.log";
 export function resolvePaths(env: NodeJS.ProcessEnv = process.env, runtimeHomeOverride?: string): ResolvedPaths {
   const home = env.HOME || os.homedir();
   const codexHome = env.CODEX_HOME || path.join(home, ".codex");
-  const runtimeHome = runtimeHomeOverride ?? path.join(home, ".codex-cliproxy-gateway");
+  const runtimeHome = runtimeHomeOverride ?? path.join(home, ".local-aiproxy");
   return {
     home,
     codexHome,
@@ -45,37 +48,70 @@ export function resolvePaths(env: NodeJS.ProcessEnv = process.env, runtimeHomeOv
     configToml: path.join(codexHome, "config.toml"),
     gatewayConfig: path.join(runtimeHome, "config.json"),
     stateFile: path.join(runtimeHome, "state.json"),
-    catalogFile: path.join(runtimeHome, "cliproxy-catalog.json"),
+    // config.catalogPath 的默认值：只是运行时目录锚点，网关不读写这个文件本身。
+    catalogFile: path.join(runtimeHome, "catalog.json"),
     modelMergeFile: path.join(runtimeHome, "models.json"),
-    upstreamModelsCacheFile: path.join(runtimeHome, "models-cache.json"),
-    modelsCacheFile: path.join(codexHome, "models_cache.json"),
     /** 进程日志：stdout、stderr、配置审计与请求摘要都写这一个文件。 */
     stdoutLog: path.join(runtimeHome, "gateway.log"),
     logDir: path.join(runtimeHome, "logs"),
     /** Web UI 访问令牌：网关启动时惰性生成，CLI web 命令读取它拼出带 token 的 URL。 */
     uiTokenFile: path.join(runtimeHome, "ui-token"),
-    /** 上游 API key 的文件后端（非 darwin 平台替代 macOS Keychain）：0600、原子写，内容是明文密钥。 */
-    credentialsFile: path.join(runtimeHome, "credentials.json"),
     launchAgent: runtimeHomeOverride
-      ? path.join(runtimeHomeOverride, "Library", "LaunchAgents", "codex-cliproxy-gateway-temp.plist")
-      : path.join(home, "Library", "LaunchAgents", "codex-cliproxy-gateway.plist"),
+      ? path.join(runtimeHomeOverride, "Library", "LaunchAgents", "local-aiproxy-temp.plist")
+      : path.join(home, "Library", "LaunchAgents", "local-aiproxy.plist"),
     webUiLaunchAgent: runtimeHomeOverride
-      ? path.join(runtimeHomeOverride, "Library", "LaunchAgents", "codex-cliproxy-webui-temp.plist")
-      : path.join(home, "Library", "LaunchAgents", "codex-cliproxy-webui.plist"),
+      ? path.join(runtimeHomeOverride, "Library", "LaunchAgents", "local-aiproxy-webui-temp.plist")
+      : path.join(home, "Library", "LaunchAgents", "local-aiproxy-webui.plist"),
   };
 }
 
-/** 目录文件按上游类型命名（cliproxy-catalog.json / newapi-catalog.json），切换上游互不覆盖。 */
-export function catalogFileFor(paths: ResolvedPaths, upstreamType: UpstreamType): string {
-  return path.join(paths.runtimeHome, `${upstreamType}-catalog.json`);
+export interface RuntimeHomeMigration {
+  from: string;
+  to: string;
+  /** 旧目录改名后的备份位置；迁移绝不删除用户数据。 */
+  backup: string;
 }
 
-/** 网关自管的全部目录文件；新增上游类型时必须同步补充，供卸载清理与 config.toml 守卫使用。 */
+function isDirectory(target: string): boolean {
+  try {
+    return fs.statSync(target).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 一次性搬迁旧运行时目录：把 `~/.codex-cliproxy-gateway` 的内容复制到新的
+ * `~/.local-aiproxy`，再把旧目录改名为 `.bak`（已存在则加时间戳后缀）。
+ *
+ * 只在「旧目录存在 且 新目录不存在」时执行：已迁移过的安装不会因为某次
+ * 清理旧目录就重建，新目录已存在时绝不覆盖。
+ */
+export function migrateRuntimeHome(
+  paths: ResolvedPaths,
+  now: () => number = Date.now,
+): RuntimeHomeMigration | undefined {
+  const legacy = path.join(paths.home, LEGACY_RUNTIME_HOME_DIR);
+  if (legacy === paths.runtimeHome) return undefined;
+  if (!isDirectory(legacy) || fs.existsSync(paths.runtimeHome)) return undefined;
+  fs.cpSync(legacy, paths.runtimeHome, { recursive: true });
+  let backup = `${legacy}.bak`;
+  if (fs.existsSync(backup)) backup = `${legacy}.bak-${now()}`;
+  fs.renameSync(legacy, backup);
+  return { from: legacy, to: paths.runtimeHome, backup };
+}
+
+/**
+ * 网关自管的目录文件，卸载时清理。两个本地 adapter 各按自己的命名规则落盘：
+ * ZCode 用一个共用的 `zcode-catalog.json`，CodeBuddy/WorkBuddy 按「产品 × 地域」各一个
+ * （`codebuddyCatalogFileName()` 决定）。`codebuddy-catalog.json` 是加地域前缀之前的旧命名，
+ * 保留在列表里以便清掉老安装的残留。
+ */
 export function managedCatalogFiles(paths: ResolvedPaths): string[] {
+  const profiles = ["codebuddy-cn", "codebuddy-intl", "workbuddy-cn", "workbuddy-intl"];
   return [
-    catalogFileFor(paths, "cliproxy"),
-    catalogFileFor(paths, "newapi"),
     path.join(paths.runtimeHome, "zcode-catalog.json"),
     path.join(paths.runtimeHome, "codebuddy-catalog.json"),
+    ...profiles.map((name) => path.join(paths.runtimeHome, `${name}-catalog.json`)),
   ];
 }

@@ -1,5 +1,11 @@
 # 官方 Realtime `/live` 代理实施方案
 
+> **2026-09-23 变更**：`install` 命令已移除，网关也不再读写 `~/.codex/config.toml`。
+> 下面第零阶段的「加入受管配置键」「安装时写入两项 base url」「卸载只恢复受管键」
+> **已不再实现**：`experimental_realtime_ws_base_url` 与
+> `experimental_realtime_webrtc_call_base_url` 由用户自行写入 Codex 配置
+> （见 README「启动与首次使用」）。Realtime 转发路由与 provider 快照逻辑不受影响。
+
 ## 当前状态
 
 2026-08-17 已完成配置接入、HTTP call-create 适配和 Bun 原生 WebSocket 桥接。
@@ -37,14 +43,14 @@ WS /v1/realtime                       普通 Realtime 或 WebRTC sideband 桥接
 opencodex 的 sideband WebSocket 默认直连 `https://api.openai.com/v1`，WebRTC
 call-create 也可由独立配置绕过 `openai_base_url`。
 
-因此安装逻辑必须：
+因此 Codex 配置里需要同时设置三个 base url（历史上由安装逻辑写入，现已改为用户自行配置）：
 
-1. 将 `experimental_realtime_ws_base_url` 加入受管配置键。
-2. 将 `experimental_realtime_webrtc_call_base_url` 加入受管配置键。
-3. 安装与 gateway `restart` 时将两项都写入与 `openai_base_url` 相同的网关基址，例如：
-   `http://127.0.0.1:8320/v1`。
-4. 安装前备份两项原值；卸载时只恢复受管键，保留用户后续对其他配置的修改。
-5. `status` 输出两项的当前值。
+1. `openai_base_url`
+2. `experimental_realtime_ws_base_url` —— sideband WebSocket 的入口。
+3. `experimental_realtime_webrtc_call_base_url` —— WebRTC call-create 的入口。
+
+三者都指向网关基址，例如 `http://127.0.0.1:8320/v1`。
+`status` 会只读显示它们的当前值，便于确认 Codex 是否已指向本网关。
 
 ### Provider 快照
 
@@ -138,10 +144,8 @@ call-create 也可由独立配置绕过 `openai_base_url`。
 - 不支持的 `/v1/realtime/calls/{callId}` 及未识别 Upgrade 返回 `426`，且不会调用
   普通 `fetch()`。
 - `/v1/realtime/transcription_sessions` 等非桥接接口仍转发官方。
-- 安装与 gateway `restart` 会写入 `openai_base_url`、
-  `experimental_realtime_ws_base_url` 与
-  `experimental_realtime_webrtc_call_base_url`；`models --sync` 不修改这三个服务地址；
-  卸载只恢复受管键；`status` 能显示当前值。
+- 网关不读写 `~/.codex/config.toml`：三个 base url 由用户自行配置，
+  `start`/`restart`/`models --sync`/`config` 都不得改动该文件；`status` 只读显示当前值。
 - 网关启动时仅加载一次 `CODEX_HOME/config.toml` 的 provider 快照：未设置 provider
   可继续，指定 provider 返回 `400`，无法解析返回 `503`；拒绝时 Token 不得出站。
 - 无 `Authorization` 返回 `401`；账号态请求走 ChatGPT backend，只有

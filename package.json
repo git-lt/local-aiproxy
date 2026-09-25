@@ -1,10 +1,10 @@
 {
-  "name": "codex-cliproxy-gateway",
+  "name": "local-aiproxy",
   "version": "0.7.1",
   "description": "A cross-platform Bun-powered local gateway that keeps Codex ChatGPT OAuth for native models and routes cliproxy/* models to CLIProxyAPI.",
   "type": "module",
   "bin": {
-    "codex-cliproxy": "./dist/index.js"
+    "local-aiproxy": "./dist/index.js"
   },
   "files": [
     "CHANGELOG.md",
@@ -16,7 +16,7 @@
   ],
   "scripts": {
     "dev": "bun src/index.ts",
-    "dev:ui": "CODEX_CLIPROXY_UI_DEV=1 bun run dev web && vite --config vite.config.ts",
+    "dev:ui": "LOCAL_AIPROXY_UI_DEV=1 bun run dev web && vite --config vite.config.ts",
     "build:ui": "bun scripts/build-ui.ts",
     "build": "bun run build:ui && bun build src/index.ts --target=bun --format=esm --outfile=dist/index.js",
     "changelog": "bun scripts/changelog.ts",
@@ -28,7 +28,7 @@
     "prepack": "bun run release:check",
     "preversion": "bun run release:check",
     "version": "bun run changelog",
-    "release:check": "if [ \"$CODEX_CLIPROXY_SKIP_TESTS\" = \"1\" ]; then bun run typecheck && bun run build; else bun run check; fi",
+    "release:check": "if [ \"$LOCAL_AIPROXY_SKIP_TESTS\" = \"1\" ]; then bun run typecheck && bun run build; else bun run check; fi",
     "release:version": "lerna version",
     "release": "lerna publish from-git"
   },

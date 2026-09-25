@@ -4,44 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { realPathOrResolve } from "../src/paths.ts";
-import { composeInstallFailureMessage, restoredHealthUrl, runCli } from "../src/cli.ts";
-
-test("restoredHealthUrl prefers the previous host and port after rollback", () => {
-  const next = { host: "127.0.0.1", port: 9001 };
-  assert.equal(
-    restoredHealthUrl({ host: "127.0.0.1", port: 8320 }, next),
-    "http://127.0.0.1:8320/healthz",
-  );
-  assert.equal(restoredHealthUrl(undefined, next), "http://127.0.0.1:9001/healthz");
-  assert.equal(restoredHealthUrl({}, next), "http://127.0.0.1:9001/healthz");
-  assert.equal(
-    restoredHealthUrl({ host: "localhost", port: "8320" }, next),
-    "http://localhost:9001/healthz",
-  );
-  assert.equal(
-    restoredHealthUrl({ host: "", port: -1 }, next),
-    "http://127.0.0.1:9001/healthz",
-  );
-});
-
-test("composeInstallFailureMessage keeps the original error primary and surfaces restore issues", () => {
-  assert.equal(composeInstallFailureMessage("boom"), "boom");
-  assert.equal(
-    composeInstallFailureMessage("boom", { diagnostics: "LaunchAgent is not loaded" }),
-    "boom; LaunchAgent is not loaded",
-  );
-  assert.equal(
-    composeInstallFailureMessage("boom", { restoreIssues: ["reload failed"] }),
-    "boom; launch agent restore incomplete: reload failed",
-  );
-  assert.equal(
-    composeInstallFailureMessage("boom", {
-      diagnostics: "diag",
-      restoreIssues: ["reload failed", "health failed"],
-    }),
-    "boom; diag; launch agent restore incomplete: reload failed; health failed",
-  );
-});
+import { runCli } from "../src/cli.ts";
 
 test("realPathOrResolve follows file and directory symlinks and falls back for missing parents", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "ccp-realpath-"));
@@ -68,11 +31,11 @@ test("realPathOrResolve follows file and directory symlinks and falls back for m
 test("webui is removed and web service mode binds the default install config", async () => {
   const home = await fs.promises.mkdtemp(path.join(os.tmpdir(), "ccp-webui-cli-"));
   const previousHome = process.env.HOME;
-  const previousService = process.env.CODEX_CLIPROXY_UI_SERVICE;
+  const previousService = process.env.LOCAL_AIPROXY_UI_SERVICE;
   try {
     process.env.HOME = home;
-    process.env.CODEX_CLIPROXY_UI_SERVICE = "1";
-    const defaultConfig = path.join(home, ".codex-cliproxy-gateway", "config.json");
+    process.env.LOCAL_AIPROXY_UI_SERVICE = "1";
+    const defaultConfig = path.join(home, ".local-aiproxy", "config.json");
     await assert.rejects(runCli(["webui"]), /Unknown command: webui/);
     await assert.rejects(
       runCli(["webui", "--config", path.join(home, "other.json")]),
@@ -86,8 +49,8 @@ test("webui is removed and web service mode binds the default install config", a
   } finally {
     if (previousHome === undefined) delete process.env.HOME;
     else process.env.HOME = previousHome;
-    if (previousService === undefined) delete process.env.CODEX_CLIPROXY_UI_SERVICE;
-    else process.env.CODEX_CLIPROXY_UI_SERVICE = previousService;
+    if (previousService === undefined) delete process.env.LOCAL_AIPROXY_UI_SERVICE;
+    else process.env.LOCAL_AIPROXY_UI_SERVICE = previousService;
     await fs.promises.rm(home, { recursive: true, force: true });
   }
 });

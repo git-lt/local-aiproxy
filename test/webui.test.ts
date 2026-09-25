@@ -37,7 +37,7 @@ interface Fixture {
 }
 
 function makePaths(home: string): ResolvedPaths {
-  const runtimeHome = path.join(home, ".codex-cliproxy-gateway");
+  const runtimeHome = path.join(home, ".local-aiproxy");
   const codexHome = path.join(home, ".codex");
   return {
     home,
@@ -48,14 +48,11 @@ function makePaths(home: string): ResolvedPaths {
     stateFile: path.join(runtimeHome, "state.json"),
     catalogFile: path.join(runtimeHome, "cliproxy-catalog.json"),
     modelMergeFile: path.join(runtimeHome, "models.json"),
-    upstreamModelsCacheFile: path.join(runtimeHome, "models-cache.json"),
-    modelsCacheFile: path.join(codexHome, "models_cache.json"),
     stdoutLog: path.join(runtimeHome, "gateway.log"),
     logDir: path.join(runtimeHome, "logs"),
     uiTokenFile: path.join(runtimeHome, "ui-token"),
-    credentialsFile: path.join(runtimeHome, "credentials.json"),
-    launchAgent: path.join(home, "Library", "LaunchAgents", "codex-cliproxy-gateway.plist"),
-    webUiLaunchAgent: path.join(home, "Library", "LaunchAgents", "codex-cliproxy-webui.plist"),
+    launchAgent: path.join(home, "Library", "LaunchAgents", "local-aiproxy.plist"),
+    webUiLaunchAgent: path.join(home, "Library", "LaunchAgents", "local-aiproxy-webui.plist"),
   };
 }
 
@@ -66,16 +63,12 @@ function makeConfig(paths: ResolvedPaths, overrides: Partial<GatewayConfig> = {}
     host: "127.0.0.1",
     port: 8320,
     mountPath: "/v1",
-    prefix: "cliproxy/",
-    officialBaseUrl: "https://chatgpt.com/backend-api/codex",
-    upstreamBaseUrl: "http://127.0.0.1:8317/v1",
     catalogPath: paths.catalogFile,
     requestLogging: true,
     logDir: paths.logDir,
     zcode: false,
     maxRequestLogs: 0,
     maxGatewayLogBytes: 0,
-    selectedModels: ["glm-5.3", "kimi-k2"],
     ...overrides,
   } as GatewayConfig;
 }
@@ -120,30 +113,20 @@ function authedRequest(
   });
 }
 
-/** 本机假上游：记录收到的请求行与 authorization 头，按 handler 注入响应。 */
-interface FakeUpstream {
-  url: string;
-  requests: Array<{ url: string; authorization: string | null }>;
-  close: () => Promise<void>;
-}
-
-async function startFakeUpstream(
-  respond: (request: http.IncomingMessage, response: http.ServerResponse) => void,
-): Promise<FakeUpstream> {
-  const requests: FakeUpstream["requests"] = [];
-  const server = http.createServer((request, response) => {
-    requests.push({ url: request.url ?? "/", authorization: request.headers.authorization ?? null });
-    respond(request, response);
+test("GET /ui/api/models returns per-provider slug lists and requires the token", async () => {
+  const { handler, home } = await makeFixture({
+    webUi: { providerModels: async () => ({ zcode: ["zcode/glm-5.3"], codebuddy: ["codebuddy-cn/glm-5.3"], cline: [], qodercn: ["qodercn/auto"] }) },
   });
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const address = server.address();
-  const port = typeof address === "object" && address !== null ? address.port : 0;
-  return {
-    url: `http://127.0.0.1:${port}/v1`,
-    requests,
-    close: () => new Promise((resolve) => server.close(() => resolve())),
-  };
-}
+  try {
+    assert.equal((await handler(new Request(`${BASE}/ui/api/models`))).status, 401);
+    const response = await handler(authedRequest("/ui/api/models"));
+    assert.equal(response.status, 200);
+    const payload = await response.json() as { zcode: string[]; codebuddy: string[]; cline: string[]; qodercn: string[] };
+    assert.deepEqual(payload, { zcode: ["zcode/glm-5.3"], codebuddy: ["codebuddy-cn/glm-5.3"], cline: [], qodercn: ["qodercn/auto"] });
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
 
 test("GET /ui serves the single-file SPA shell with hardening headers", async () => {
   const { handler, home } = await makeFixture();
@@ -183,10 +166,11 @@ test("UI APIs reject missing or wrong tokens", async () => {
     assert.equal((await handler(authedRequest("/ui/api/status", { token: "ccp_wrong" }))).status, 401);
     const ok = await handler(authedRequest("/ui/api/status"));
     assert.equal(ok.status, 200);
-    const status = await ok.json() as { ok: boolean; upstreamType: string; routing: string[] };
+    const status = await ok.json() as { ok: boolean; host: string; port: number; mountPath: string };
     assert.equal(status.ok, true);
-    assert.equal(status.upstreamType, "cliproxy");
-    assert.equal(status.routing.length, 2);
+    assert.equal(status.host, "127.0.0.1");
+    assert.equal(status.port, 8320);
+    assert.equal(status.mountPath, "/v1");
   } finally {
     fs.rmSync(home, { recursive: true, force: true });
   }
@@ -239,56 +223,21 @@ test("the UI is disabled entirely when the gateway host is not loopback", async 
 });
 
 test("GET /ui/api/config returns editable and readonly groups", async () => {
-  const { handler, home } = await makeFixture();
+  const { handler, paths, home } = await makeFixture();
   try {
     const response = await handler(authedRequest("/ui/api/config"));
     assert.equal(response.status, 200);
     const payload = await response.json() as {
-      editable: { zcode: boolean; codebuddy: boolean; maxRequestLogs: number; selectedModels: string[] };
-      readonly: { upstreamBaseUrl: string; upstreamOnly: boolean; routerMode: string };
+      editable: { zcode: boolean; codebuddy: boolean; maxRequestLogs: number };
+      readonly: { host: string; port: number; mountPath: string; catalogPath: string };
     };
     assert.equal(payload.editable.zcode, false);
     assert.equal(payload.editable.codebuddy, false);
     assert.equal(payload.editable.maxRequestLogs, 0);
-    // 模型选择已迁入可编辑分组（保存走 /ui/api/upstream/models，同步重建目录文件）。
-    assert.deepEqual(payload.editable.selectedModels, ["glm-5.3", "kimi-k2"]);
-    assert.equal(payload.readonly.upstreamBaseUrl, "http://127.0.0.1:8317/v1");
-    // 路由模式按 upstreamOnly 取反导出，不直接暴露布尔值。
-    assert.equal(payload.readonly.upstreamOnly, false);
-    assert.equal(payload.readonly.routerMode, "dynamic");
-  } finally {
-    fs.rmSync(home, { recursive: true, force: true });
-  }
-});
-
-test("GET /ui/api/config 的 routerMode 随 upstreamOnly 取反", async () => {
-  const { handler, home } = await makeFixture({ config: { upstreamOnly: true } });
-  try {
-    const payload = await (await handler(authedRequest("/ui/api/config"))).json() as {
-      readonly: { upstreamOnly: boolean; routerMode: string };
-    };
-    assert.equal(payload.readonly.upstreamOnly, true);
-    assert.equal(payload.readonly.routerMode, "upstream-only");
-  } finally {
-    fs.rmSync(home, { recursive: true, force: true });
-  }
-});
-
-test("UI responses redact URL query strings that may carry tokens", async () => {
-  const { handler, home } = await makeFixture({
-    config: {
-      upstreamBaseUrl: "http://127.0.0.1:8317/v1?token=supersecret",
-      officialBaseUrl: "https://chatgpt.com/backend-api/codex?session=abc",
-    },
-  });
-  try {
-    const configText = await (await handler(authedRequest("/ui/api/config"))).text();
-    assert.ok(!configText.includes("supersecret"), "config response must not leak the upstream token");
-    assert.ok(!configText.includes("session=abc"), "config response must not leak the official query");
-    const payload = JSON.parse(configText) as { readonly: { upstreamBaseUrl: string } };
-    assert.equal(payload.readonly.upstreamBaseUrl, "http://127.0.0.1:8317/v1?…");
-    const statusText = await (await handler(authedRequest("/ui/api/status"))).text();
-    assert.ok(!statusText.includes("supersecret"), "status routing must not leak the upstream token");
+    assert.equal(payload.readonly.host, "127.0.0.1");
+    assert.equal(payload.readonly.port, 8320);
+    assert.equal(payload.readonly.mountPath, "/v1");
+    assert.equal(payload.readonly.catalogPath, paths.catalogFile);
   } finally {
     fs.rmSync(home, { recursive: true, force: true });
   }
@@ -412,272 +361,6 @@ test("POST /ui/api/config rejects invalid values and unknown fields", async () =
     assert.equal(badBody.status, 400);
   } finally {
     fs.rmSync(home, { recursive: true, force: true });
-  }
-});
-
-test("GET /ui/api/upstream/models fetches the upstream catalog without exposing the key", async () => {
-  const upstream = await startFakeUpstream((_request, response) => {
-    response.setHeader("content-type", "application/json");
-    response.end(JSON.stringify({ models: [
-      { slug: "glm-5.3", display_name: "GLM-5.3" },
-      { slug: "kimi-k2", display_name: "Kimi K2" },
-      { slug: "hidden-model", display_name: "Hidden Model", visibility: "hide" },
-    ] }));
-  });
-  const { handler, paths, home } = await makeFixture({
-    config: { upstreamBaseUrl: upstream.url },
-    webUi: { upstreamDeps: { readKey: () => "test-secret-key" } },
-  });
-  try {
-    // models-cache.json 记录的 client_version 是版本保真度最高来源，命中后不再探测 codex。
-    fs.writeFileSync(
-      paths.upstreamModelsCacheFile,
-      `${JSON.stringify({ fetched_at: "2026-09-16T00:00:00.000Z", client_version: "0.153.0" })}\n`,
-    );
-    const response = await handler(authedRequest("/ui/api/upstream/models"));
-    assert.equal(response.status, 200);
-    const payload = await response.json() as {
-      upstreamType: string;
-      models: Array<{ slug: string; displayName: string }>;
-    };
-    assert.equal(payload.upstreamType, "cliproxy");
-    assert.deepEqual(payload.models.map((model) => model.slug), ["glm-5.3", "kimi-k2"]);
-    assert.equal(payload.models[0].displayName, "GLM-5.3");
-    assert.ok(!JSON.stringify(payload).includes("test-secret-key"), "model list must not carry the API key");
-    assert.equal(upstream.requests.length, 1);
-    assert.equal(upstream.requests[0].authorization, "Bearer test-secret-key");
-    assert.match(upstream.requests[0].url, /^\/v1\/models\?client_version=0\.153\.0$/);
-  } finally {
-    await upstream.close();
-    fs.rmSync(home, { recursive: true, force: true });
-  }
-});
-
-test("POST /ui/api/upstream/models rebuilds the catalog and persists the selection", async () => {
-  const upstream = await startFakeUpstream((_request, response) => {
-    response.setHeader("content-type", "application/json");
-    response.end(JSON.stringify({ models: [
-      { slug: "glm-5.3", display_name: "GLM-5.3" },
-      { slug: "kimi-k2", display_name: "Kimi K2" },
-      { slug: "deepseek-chat", display_name: "DeepSeek Chat" },
-    ] }));
-  });
-  const { handler, paths, home } = await makeFixture({
-    config: { upstreamBaseUrl: upstream.url },
-    webUi: { upstreamDeps: { readKey: () => "test-secret-key" } },
-  });
-  try {
-    fs.writeFileSync(paths.stateFile, `${JSON.stringify({ version: 4, config: null }, null, 2)}\n`);
-    // 预置官方目录缓存：动态模式下保存后必须被重置（fetched_at 归零、models 保留）。
-    fs.writeFileSync(paths.modelsCacheFile, `${JSON.stringify({
-      fetched_at: "2026-09-16T00:00:00.000Z",
-      client_version: "0.153.0",
-      models: [{ slug: "gpt-5.5" }],
-    }, null, 2)}\n`);
-    const response = await handler(authedRequest("/ui/api/upstream/models", {
-      json: { selectedModels: ["deepseek-chat", "kimi-k2"] },
-    }));
-    assert.equal(response.status, 200);
-    const payload = await response.json() as {
-      applied: string[];
-      selected: string[];
-      count: number;
-      upstreamOnly: boolean;
-    };
-    assert.deepEqual(payload.applied, ["selectedModels"]);
-    // 返回按上游目录顺序排列的选择，而不是提交顺序。
-    assert.deepEqual(payload.selected, ["kimi-k2", "deepseek-chat"]);
-    assert.equal(payload.count, 2);
-    assert.equal(payload.upstreamOnly, false);
-
-    // 目录文件只含所选条目。
-    const catalog = JSON.parse(fs.readFileSync(paths.catalogFile, "utf8")) as { models: Array<{ slug: string }> };
-    assert.deepEqual(catalog.models.map((model) => model.slug), ["kimi-k2", "deepseek-chat"]);
-
-    // config.json 与 state.json 同步更新。
-    const saved = JSON.parse(fs.readFileSync(paths.gatewayConfig, "utf8")) as { selectedModels?: string[] };
-    assert.deepEqual(saved.selectedModels, ["kimi-k2", "deepseek-chat"]);
-    const state = JSON.parse(fs.readFileSync(paths.stateFile, "utf8")) as { config?: { selectedModels?: string[] } };
-    assert.deepEqual(state.config?.selectedModels, ["kimi-k2", "deepseek-chat"]);
-
-    // 动态路由无需重启网关或 Codex：官方目录缓存被重置后 Codex 约在 5 分钟内自动刷新。
-    const cache = JSON.parse(fs.readFileSync(paths.modelsCacheFile, "utf8")) as { fetched_at: string; models?: unknown[] };
-    assert.equal(cache.fetched_at, "2000-01-01T00:00:00Z");
-    assert.equal(Array.isArray(cache.models) && cache.models.length, 1);
-
-    const audit = fs.readFileSync(paths.stdoutLog, "utf8");
-    assert.match(audit, /config changed by `webui models`/);
-    assert.match(audit, /selectedModels: \["glm-5\.3","kimi-k2"\] -> \["kimi-k2","deepseek-chat"\]/);
-  } finally {
-    await upstream.close();
-    fs.rmSync(home, { recursive: true, force: true });
-  }
-});
-
-test("POST /ui/api/upstream/models requires a non-empty selection and keeps the cache in upstream-only mode", async () => {
-  const upstream = await startFakeUpstream((_request, response) => {
-    response.setHeader("content-type", "application/json");
-    response.end(JSON.stringify({ models: [
-      { slug: "glm-5.3", display_name: "GLM-5.3" },
-      { slug: "kimi-k2", display_name: "Kimi K2" },
-    ] }));
-  });
-  const { handler, paths, home } = await makeFixture({
-    config: { upstreamBaseUrl: upstream.url, upstreamOnly: true },
-    webUi: { upstreamDeps: { readKey: () => "test-secret-key" } },
-  });
-  try {
-    fs.writeFileSync(paths.modelsCacheFile, `${JSON.stringify({
-      fetched_at: "2026-09-16T00:00:00.000Z",
-      client_version: "0.153.0",
-      models: [{ slug: "gpt-5.5" }],
-    }, null, 2)}\n`);
-
-    // upstream-only 目录不能为空（网关按非空校验启动），空选择直接拒绝且不触碰上游。
-    const empty = await handler(authedRequest("/ui/api/upstream/models", { json: { selectedModels: [] } }));
-    assert.equal(empty.status, 400);
-    const emptyBody = await empty.json() as { error: { message: string } };
-    assert.match(emptyBody.error.message, /at least one/);
-    assert.equal(upstream.requests.length, 0);
-
-    // 已选 ID 在上游全部消失时，过滤后的目录为空；upstream-only 仍拒绝保存。
-    const stale = await handler(authedRequest("/ui/api/upstream/models", {
-      json: { selectedModels: ["retired-upstream-model"] },
-    }));
-    assert.equal(stale.status, 400);
-    const staleBody = await stale.json() as { error: { message: string } };
-    assert.match(staleBody.error.message, /at least one/);
-    assert.equal(fs.existsSync(paths.catalogFile), false);
-
-    const response = await handler(authedRequest("/ui/api/upstream/models", {
-      json: { selectedModels: ["kimi-k2"] },
-    }));
-    assert.equal(response.status, 200);
-    const payload = await response.json() as { upstreamOnly: boolean; selected: string[] };
-    assert.equal(payload.upstreamOnly, true);
-    assert.deepEqual(payload.selected, ["kimi-k2"]);
-
-    // upstream-only 由 Codex 静态加载目录文件，官方目录缓存不做无谓重置。
-    const cache = JSON.parse(fs.readFileSync(paths.modelsCacheFile, "utf8")) as { fetched_at: string };
-    assert.equal(cache.fetched_at, "2026-09-16T00:00:00.000Z");
-  } finally {
-    await upstream.close();
-    fs.rmSync(home, { recursive: true, force: true });
-  }
-});
-
-test("POST /ui/api/upstream/models drops stale IDs and still rejects malformed payloads", async () => {
-  const upstream = await startFakeUpstream((_request, response) => {
-    response.setHeader("content-type", "application/json");
-    response.end(JSON.stringify({ models: [
-      { slug: "glm-5.3", display_name: "GLM-5.3" },
-      { slug: "hidden-model", visibility: "hide" },
-    ] }));
-  });
-  const { handler, paths, home } = await makeFixture({
-    config: { upstreamBaseUrl: upstream.url },
-    webUi: { upstreamDeps: { readKey: () => "test-secret-key" } },
-  });
-  try {
-    const filtered = await handler(authedRequest("/ui/api/upstream/models", {
-      json: { selectedModels: ["glm-5.3", "no-such-model", "hidden-model"] },
-    }));
-    assert.equal(filtered.status, 200);
-    const filteredBody = await filtered.json() as { selected: string[]; count: number };
-    assert.deepEqual(filteredBody.selected, ["glm-5.3"]);
-    assert.equal(filteredBody.count, 1);
-    const catalog = JSON.parse(fs.readFileSync(paths.catalogFile, "utf8")) as { models: Array<{ slug: string }> };
-    assert.deepEqual(catalog.models.map((model) => model.slug), ["glm-5.3"]);
-    const savedAfterFilter = JSON.parse(fs.readFileSync(paths.gatewayConfig, "utf8")) as { selectedModels?: string[] };
-    assert.deepEqual(savedAfterFilter.selectedModels, ["glm-5.3"]);
-
-    const notArray = await handler(authedRequest("/ui/api/upstream/models", {
-      json: { selectedModels: "glm-5.3" },
-    }));
-    assert.equal(notArray.status, 400);
-    assert.match(((await notArray.json()) as { error: { message: string } }).error.message, /array of model ID strings/);
-
-    const duplicates = await handler(authedRequest("/ui/api/upstream/models", {
-      json: { selectedModels: ["glm-5.3", "glm-5.3"] },
-    }));
-    assert.equal(duplicates.status, 400);
-    assert.match(((await duplicates.json()) as { error: { message: string } }).error.message, /empty or duplicate/);
-
-    // 校验失败不写盘：config.json 的选择保持原样。
-    const saved = JSON.parse(fs.readFileSync(paths.gatewayConfig, "utf8")) as { selectedModels?: string[] };
-    assert.deepEqual(saved.selectedModels, ["glm-5.3"]);
-  } finally {
-    await upstream.close();
-    fs.rmSync(home, { recursive: true, force: true });
-  }
-});
-
-test("upstream model fetch failures return 502 and never leak the configured query", async () => {
-  const upstream = await startFakeUpstream((_request, response) => {
-    response.statusCode = 500;
-    response.end("boom");
-  });
-  const { handler, home } = await makeFixture({
-    config: { upstreamBaseUrl: `${upstream.url}?token=supersecret` },
-    webUi: { upstreamDeps: { readKey: () => "test-secret-key" } },
-  });
-  try {
-    const failed = await handler(authedRequest("/ui/api/upstream/models"));
-    assert.equal(failed.status, 502);
-    const failedText = await failed.text();
-    assert.ok(!failedText.includes("supersecret"), "error must not leak the upstream query");
-    assert.ok(!failedText.includes("test-secret-key"), "error must not leak the API key");
-  } finally {
-    await upstream.close();
-    fs.rmSync(home, { recursive: true, force: true });
-  }
-
-  // 上游直接不可达：同样 502 且不泄漏。
-  const { handler: refusedHandler, home: refusedHome } = await makeFixture({
-    config: { upstreamBaseUrl: "http://127.0.0.1:9/v1?token=supersecret" },
-    webUi: { upstreamDeps: { readKey: () => "test-secret-key" } },
-  });
-  try {
-    const refused = await refusedHandler(authedRequest("/ui/api/upstream/models"));
-    assert.equal(refused.status, 502);
-    const refusedText = await refused.text();
-    assert.ok(!refusedText.includes("supersecret"));
-  } finally {
-    fs.rmSync(refusedHome, { recursive: true, force: true });
-  }
-});
-
-test("POST /ui/api/codex/restart stops codex app servers through the injected runtime", async () => {
-  const { handler, home } = await makeFixture({
-    webUi: {
-      upstreamDeps: {
-        stopCodexServers: async () => ({ scan: "ok" as const, results: [{ pid: 4321, status: "stopped" as const }] }),
-      },
-    },
-  });
-  try {
-    const ok = await handler(authedRequest("/ui/api/codex/restart", { method: "POST" }));
-    assert.equal(ok.status, 200);
-    const payload = await ok.json() as { results: Array<{ pid: number; status: string }> };
-    assert.deepEqual(payload.results, [{ pid: 4321, status: "stopped" }]);
-  } finally {
-    fs.rmSync(home, { recursive: true, force: true });
-  }
-
-  const failing = await makeFixture({
-    webUi: {
-      upstreamDeps: {
-        stopCodexServers: async () => ({ scan: "unknown" as const, results: [], error: "ps failed" }),
-      },
-    },
-  });
-  try {
-    const response = await failing.handler(authedRequest("/ui/api/codex/restart", { method: "POST" }));
-    assert.equal(response.status, 500);
-    const body = await response.json() as { error: { message: string } };
-    assert.match(body.error.message, /unknown: ps failed/);
-  } finally {
-    fs.rmSync(failing.home, { recursive: true, force: true });
   }
 });
 
@@ -934,35 +617,6 @@ test("ensureUiToken reuses an existing token and generates a fresh one when miss
   }
 });
 
-test("POST /ui/api/config rejects combinations the restarted gateway would refuse to boot", async () => {
-  const { handler, paths, home } = await makeFixture({ config: { prefix: "zcode/" } });
-  try {
-    const before = fs.readFileSync(paths.gatewayConfig, "utf8");
-    const response = await handler(authedRequest("/ui/api/config", { json: { zcode: true } }));
-    assert.equal(response.status, 400);
-    const payload = await response.json() as { error: { message: string } };
-    assert.match(payload.error.message, /前缀保留给 ZCode/);
-    // 校验失败不写盘：原配置逐字节保留，运行中的服务不受影响。
-    assert.equal(fs.readFileSync(paths.gatewayConfig, "utf8"), before);
-  } finally {
-    fs.rmSync(home, { recursive: true, force: true });
-  }
-});
-
-test("POST /ui/api/config rejects codebuddy prefix conflicts before writing", async () => {
-  const { handler, paths, home } = await makeFixture({ config: { prefix: "workbuddy/" } });
-  try {
-    const before = fs.readFileSync(paths.gatewayConfig, "utf8");
-    const response = await handler(authedRequest("/ui/api/config", { json: { codebuddy: true } }));
-    assert.equal(response.status, 400);
-    const payload = await response.json() as { error: { message: string } };
-    assert.match(payload.error.message, /前缀保留给 CodeBuddy\/WorkBuddy/);
-    assert.equal(fs.readFileSync(paths.gatewayConfig, "utf8"), before);
-  } finally {
-    fs.rmSync(home, { recursive: true, force: true });
-  }
-});
-
 test("webUiContextForInstance keeps the full config path and never manages the default service", async () => {
   const home = await fs.promises.mkdtemp(path.join(os.tmpdir(), "ccp-webui-ctx-"));
   try {
@@ -1059,7 +713,7 @@ test("websocket upgrade requests to /ui never bridge upstream, on either port", 
     fs.writeFileSync(paths.gatewayConfig, `${JSON.stringify(config, null, 2)}\n`);
     fs.writeFileSync(paths.uiTokenFile, `${TOKEN}\n`, { mode: 0o600 });
     // 网关默认不启动 UI：两个服务显式分开启动，模拟生产形态。
-    const server = startGateway(config, "invalid");
+    const server = startGateway(config);
     const uiServer = startWebUiServer(config, { paths });
     assert.ok(uiServer, "loopback config must start the ui server");
     const requestStatus = (port: number, requestPath: string): Promise<number> =>
@@ -1123,16 +777,16 @@ test("the web ui launch agent stays off by default (no RunAtLoad, no KeepAlive)"
   const { renderWebUiAgent, WEBUI_LAUNCHD_LABEL } = await import("../src/launchd.ts");
   const plist = renderWebUiAgent({
     bunPath: "/usr/local/bin/bun",
-    cliPath: "/usr/local/lib/codex-cliproxy/index.js",
+    cliPath: "/usr/local/lib/local-aiproxy/index.js",
     codexHome: "/home/u/.codex",
-    logPath: "/home/u/.codex-cliproxy-gateway/webui.log",
+    logPath: "/home/u/.local-aiproxy/webui.log",
   });
   assert.match(plist, new RegExp(`<string>${WEBUI_LAUNCHD_LABEL}</string>`));
   assert.match(plist, /<key>RunAtLoad<\/key>\s*<false\/>/);
   assert.match(plist, /<key>KeepAlive<\/key>\s*<false\/>/);
   assert.match(plist, /<string>web<\/string>/);
   assert.doesNotMatch(plist, /<string>webui<\/string>/);
-  assert.match(plist, /<key>CODEX_CLIPROXY_UI_SERVICE<\/key>\s*<string>1<\/string>/);
+  assert.match(plist, /<key>LOCAL_AIPROXY_UI_SERVICE<\/key>\s*<string>1<\/string>/);
   // 后台复用 web 的服务模式，始终绑定默认安装配置。
   assert.doesNotMatch(plist, /--config/);
 });
@@ -1145,9 +799,9 @@ test("web service mode runs without installation state or a gateway and exits on
       ...process.env,
       HOME: fixture.home,
       CODEX_HOME: fixture.paths.codexHome,
-      CODEX_CLIPROXY_UI_SERVICE: "1",
+      LOCAL_AIPROXY_UI_SERVICE: "1",
       // 服务模式必须优先于开发模式，避免后台进程再次启动 LaunchAgent。
-      CODEX_CLIPROXY_UI_DEV: "1",
+      LOCAL_AIPROXY_UI_DEV: "1",
     },
     stdout: "pipe",
     stderr: "pipe",

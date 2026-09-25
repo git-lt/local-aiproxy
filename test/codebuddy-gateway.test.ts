@@ -101,15 +101,13 @@ interface FixtureContext {
 async function fixture(run: (context: FixtureContext) => Promise<void>): Promise<void> {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "cb-gateway-"));
   const config: GatewayConfig = {
-    host: "127.0.0.1", port: 8320, mountPath: "/v1", prefix: "cliproxy/", zcode: false, codebuddy: true, upstreamOnly: false,
-    officialBaseUrl: "https://official.invalid/v1", upstreamBaseUrl: "https://cpa.invalid/v1",
+    host: "127.0.0.1", port: 8320, mountPath: "/v1", zcode: false, codebuddy: true, enabledModels: ["*"],
     catalogPath: path.join(directory, "catalog.json"), logDir: path.join(directory, "logs"),
   };
   fs.writeFileSync(config.catalogPath, JSON.stringify({ models: [{ slug: "test-cpa", priority: 0 }] }));
   const handlers: ReturnType<typeof createGatewayHandler>[] = [];
   const originalFetch = globalThis.fetch;
-  globalThis.fetch = (async (input: string | URL | Request) => {
-    if (String(input).includes("/models")) return Response.json({ models: [{ slug: "gpt-native", priority: 0 }] });
+  globalThis.fetch = (async () => {
     throw new Error("测试禁止未模拟的网络请求");
   }) as unknown as typeof fetch;
   const chats: ChatCall[] = [];
@@ -126,10 +124,6 @@ async function fixture(run: (context: FixtureContext) => Promise<void>): Promise
       create(options: FixtureOptions = {}) {
         const handler = createGatewayHandler(
           { ...config, ...options.config },
-          "fake-cpa-key",
-          "invalid",
-          new Set<string>(), new Set<string>(),
-          path.join(directory, "models-cache.json"),
           undefined,
           undefined,
           {
@@ -252,33 +246,29 @@ test("转发内容：上游 URL、model 前缀剥离与身份头；入站 OAuth 
   });
 });
 
-test("workbuddy-intl/ 前缀路由到 WorkBuddy 端点", async () => {
+test("workbuddy 前缀已停用：目录不展示、转发 404", async () => {
   await fixture(async ({ create, chats }) => {
     const handler = create({ profile: "intl-work" });
     const models = await handler(new Request("http://127.0.0.1:8320/v1/models"));
     const catalog = await models.json() as Json;
-    // 两族同裸 ID 时展示层只保留 cli 条目（去重规则），work 族重名条目不重复展示。
-    assert.ok(catalog.data.some((model: Json) => model.id === "codebuddy-intl/gpt-5.6-luna"), "同裸 ID 保留 cli 族条目");
-    assert.ok(!catalog.data.some((model: Json) => model.id === "workbuddy-intl/gpt-5.6-luna"), "work 族重名条目被去重");
-    assert.ok(!catalog.data.some((model: Json) => model.id === "workbuddy-intl/default-model"), "档位模型被目录过滤");
-    // 去重只影响展示：workbuddy-intl/ 前缀仍按产品路由到 WorkBuddy 端点。
+    // 只拉 CodeBuddy（cli 产品）：目录里没有 workbuddy 条目。
+    assert.ok(catalog.data.some((model: Json) => model.id === "codebuddy-intl/gpt-5.6-luna"), "cli 族条目正常展示");
+    assert.ok(!catalog.data.some((model: Json) => model.id.startsWith("workbuddy-")), "workbuddy 条目不再出现在目录");
+    // workbuddy 前缀转发一律 404。
     const response = await handler(request("workbuddy-intl/gpt-5.6-luna", { stream: false }));
-    assert.equal(response.status, 200);
-    assert.equal((await response.json() as Json).model, "workbuddy-intl/gpt-5.6-luna");
-    assert.equal(chats[0]!.url, "https://www.workbuddy.ai/v2/chat/completions");
-    assert.ok(chats[0]!.headers.get("user-agent")?.startsWith("WorkBuddy/"));
+    assert.equal(response.status, 404);
+    assert.match(JSON.stringify(await response.json()), /WorkBuddy 模型暂不提供服务/);
+    assert.equal(chats.length, 0, "不发起 WorkBuddy 上游请求");
   });
 });
 
-test("目录请求头：cli 接口加 x-client-platform，work 接口严禁携带", async () => {
+test("目录请求头：cli 接口加 x-client-platform，且只拉 cli 产品", async () => {
   await fixture(async ({ create, catalogFetches }) => {
     const handler = create({ profile: "intl-cli" });
     await handler(new Request("http://127.0.0.1:8320/v1/models"));
-    // 同地域回退让 cli 登录也供 work 接口拉目录：两个产品接口各拉一次。
-    assert.equal(catalogFetches.length, 2);
-    const platforms = catalogFetches.map((headers) => headers.get("x-client-platform"));
-    assert.equal(platforms.filter((value) => value === "cli").length, 1, "cli 目录请求必须带平台头");
-    assert.equal(platforms.filter((value) => value === null).length, 1, "work 目录请求不得带 cli 平台头");
+    // WorkBuddy（work 产品）暂不拉取：只发一次 cli 目录请求。
+    assert.equal(catalogFetches.length, 1);
+    assert.equal(catalogFetches[0]!.get("x-client-platform"), "cli");
   });
 });
 
@@ -328,12 +318,10 @@ test("凭据错误返回 503 configuration_error，带重新登录指引", async
   try {
     const handler = createGatewayHandler(
       {
-        host: "127.0.0.1", port: 8320, mountPath: "/v1", prefix: "cliproxy/", zcode: false, codebuddy: true, upstreamOnly: false,
-        officialBaseUrl: "https://official.invalid/v1", upstreamBaseUrl: "https://cpa.invalid/v1",
+        host: "127.0.0.1", port: 8320, mountPath: "/v1", zcode: false, codebuddy: true, enabledModels: ["*"],
         catalogPath: path.join(directory, "catalog.json"), logDir: path.join(directory, "logs"),
       },
-      "fake-cpa-key", "invalid", new Set<string>(), new Set<string>(),
-      path.join(directory, "models-cache.json"), undefined, undefined,
+      undefined, undefined,
       {
         credentialCache: {
           forProduct: async () => { throw new CodebuddyCredentialError("CodeBuddy 凭据已过期；请在桌面端重新登录"); },
@@ -390,21 +378,24 @@ test("请求日志不落 token 明文", async () => {
   });
 });
 
-test("upstream-only 模式下 CodeBuddy 整体禁用：不拦截、不拉目录", async () => {
-  await fixture(async ({ create }) => {
-    let fetched = 0;
-    const handler = create({
-      config: { upstreamOnly: true, prefix: "" },
-      chatResponse: () => chatUpstream(),
-      catalogResponse: () => { fetched++; return Response.json(configData()); },
-    });
-    const models = await handler(new Request("http://127.0.0.1:8320/v1/models"));
-    const catalog = await models.json() as Json;
-    assert.ok(!JSON.stringify(catalog).includes("codebuddy-intl/"), "upstream-only 不合并 codebuddy 目录");
-    // 请求也不拦截：走纯转发路径（cpa.invalid 不可达）。
-    const response = await handler(request("codebuddy-intl/gpt-5.6-luna", { stream: false }));
-    assert.equal(response.status, 502, "未拦截的请求走纯转发路径");
-    assert.equal(fetched, 0, "未启用时绝不发起目录请求");
+test("中转链路的 local-proxy/ 前缀与连写段归一化到同一路由", async () => {
+  await fixture(async ({ create, chats }) => {
+    const handler = create({});
+    await handler(new Request("http://127.0.0.1:8320/v1/models"));
+    // opencodex 原样转发目录 slug：外层 local-proxy/ 前缀 + `codebuddy-cn-<model>` 连写。
+    const response = await handler(request("local-proxy/codebuddy-cn-deepseek-v4-pro", { stream: false }));
+    assert.equal(response.status, 200);
+    const result = await response.json() as Json;
+    assert.equal(result.status, "completed");
+    assert.equal(chats.length, 1);
+    assert.equal(chats[0]!.body.model, "deepseek-v4-pro", "上游必须收到剥掉路由段的模型 ID");
+    // workbuddy 连写虽归一化为 workbuddy-cn/glm-5.3，但 work 产品已停用 → 404。
+    const wsResponse = await handler(request("local-proxy/workbuddy-cn-glm-5.3", { stream: true }));
+    assert.equal(wsResponse.status, 404);
+    assert.equal(chats.length, 1, "workbuddy 请求不产生上游调用");
+    // 未识别的外层前缀不做剥离，仍按原样给出 404。
+    const unknown = await handler(request("other-proxy/codebuddy-cn/glm-5.3"));
+    assert.equal(unknown.status, 404);
   });
 });
 
@@ -418,7 +409,7 @@ test("WebSocket 升级按 codebuddy 前缀本地拒绝，不桥接上游", async
     assert.ok(isCodebuddyResponsesWebSocket(wsRequest, config));
     const response = await handler(wsRequest);
     assert.equal(response.status, 426);
-    assert.equal(response.headers.get("x-codex-cliproxy-gateway"), "codebuddy-http-only");
+    assert.equal(response.headers.get("x-local-aiproxy"), "codebuddy-http-only");
   });
 });
 
@@ -439,30 +430,23 @@ test("compaction 触发时走压缩请求路径并返回摘要", async () => {
   });
 });
 
-test("validateCodebuddyConfig：环回与保留前缀约束", () => {
+test("validateCodebuddyConfig：环回约束与字段校验", () => {
   const base: GatewayConfig = {
-    host: "127.0.0.1", port: 8320, mountPath: "/v1", prefix: "cliproxy/",
-    officialBaseUrl: "https://official.invalid/v1", upstreamBaseUrl: "https://cpa.invalid/v1", catalogPath: "/tmp/catalog.json",
+    host: "127.0.0.1", port: 8320, mountPath: "/v1", catalogPath: "/tmp/catalog.json",
   };
   validateCodebuddyConfig({ ...base, codebuddy: true });
   validateCodebuddyConfig({ ...base, codebuddy: false, host: "0.0.0.0" });
   validateCodebuddyConfig({ ...base, codebuddy: true, codebuddyRegion: "cn" });
   validateCodebuddyConfig({ ...base, codebuddy: false, codebuddyRegion: "auto" });
   assert.throws(() => validateCodebuddyConfig({ ...base, codebuddy: true, host: "0.0.0.0" }), /环回/);
-  for (const prefix of ["codebuddy/", "workbuddy/", "codebuddy-cn/", "workbuddy-cn/", "codebuddy-intl/", "workbuddy-intl/"]) {
-    assert.throws(() => validateCodebuddyConfig({ ...base, codebuddy: true, prefix }), /前缀保留/, prefix);
-  }
   assert.throws(() => validateCodebuddyConfig({ ...base, codebuddy: "on" } as unknown as GatewayConfig), /boolean/);
   assert.throws(() => validateCodebuddyConfig({ ...base, codebuddyRegion: "us" } as unknown as GatewayConfig), /codebuddyRegion/);
-  // upstream-only 下不加约束。
-  validateCodebuddyConfig({ ...base, codebuddy: true, host: "0.0.0.0", upstreamOnly: true });
 });
 
 test("适配器目录投影与未启用时的空目录", async () => {  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "cb-adapter-"));
   try {
     const base: GatewayConfig = {
-      host: "127.0.0.1", port: 8320, mountPath: "/v1", prefix: "cliproxy/",
-      officialBaseUrl: "https://official.invalid/v1", upstreamBaseUrl: "https://cpa.invalid/v1", catalogPath: path.join(directory, "catalog.json"),
+      host: "127.0.0.1", port: 8320, mountPath: "/v1", catalogPath: path.join(directory, "catalog.json"),
     };
     const enabled = createCodebuddyAdapter({ ...base, codebuddy: true }, {
       credentialCache: { forProduct: async () => credential(), close: () => {} },
@@ -479,7 +463,6 @@ test("适配器目录投影与未启用时的空目录", async () => {  const di
     const disabled = createCodebuddyAdapter({ ...base, codebuddy: false }, {});
     assert.deepEqual((await disabled.catalog()).models, []);
     disabled.close();
-    assert.equal(codebuddyEnabled({ ...base, codebuddy: true, upstreamOnly: true }), false);
     assert.equal(codebuddyEnabled({ ...base, codebuddy: true }), true);
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
@@ -494,8 +477,7 @@ test("适配器启动即刷新目录，并注册可回收的定时刷新", async
   let fetches = 0;
   try {
     const base: GatewayConfig = {
-      host: "127.0.0.1", port: 8320, mountPath: "/v1", prefix: "cliproxy/",
-      officialBaseUrl: "https://official.invalid/v1", upstreamBaseUrl: "https://cpa.invalid/v1",
+      host: "127.0.0.1", port: 8320, mountPath: "/v1",
       catalogPath: path.join(directory, "catalog.json"),
     };
     const adapter = createCodebuddyAdapter({ ...base, codebuddy: true }, {
@@ -540,18 +522,17 @@ test("config --codebuddy 写入状态与审计；upstream-only 报告生效值",
   const printed: string[] = [];
   console.log = (value?: unknown) => { printed.push(String(value)); };
   try {
-    const runtimeHome = path.join(home, ".codex-cliproxy-gateway");
+    const runtimeHome = path.join(home, ".local-aiproxy");
     fs.mkdirSync(runtimeHome, { recursive: true });
     const gatewayConfig = path.join(runtimeHome, "config.json");
     const stateFile = path.join(runtimeHome, "state.json");
     const config = {
       $schema: GATEWAY_CONFIG_SCHEMA_URL,
       configVersion: GATEWAY_CONFIG_VERSION,
-      host: "127.0.0.1", port: 8320, mountPath: "/v1", prefix: "cliproxy/",
-      officialBaseUrl: "https://official.example/codex", upstreamBaseUrl: "http://127.0.0.1:8317/v1",
+      host: "127.0.0.1", port: 8320, mountPath: "/v1",
       catalogPath: path.join(runtimeHome, "cliproxy-catalog.json"),
-      selectedModels: [], requestLogging: false, maxRequestLogs: 0, maxGatewayLogBytes: 0,
-      upstreamOnly: false, zcode: false, codebuddy: false, logDir: path.join(runtimeHome, "logs"),
+      requestLogging: false, maxRequestLogs: 0, maxGatewayLogBytes: 0,
+      zcode: false, codebuddy: false, logDir: path.join(runtimeHome, "logs"),
     };
     fs.writeFileSync(gatewayConfig, `${JSON.stringify(config)}\n`);
     fs.writeFileSync(stateFile, `${JSON.stringify({ version: 4, config })}\n`);
@@ -571,18 +552,8 @@ test("config --codebuddy 写入状态与审计；upstream-only 报告生效值",
 
     printed.length = 0;
     await runCli(["config"]);
-    let status = JSON.parse(printed.join("\n")) as Json;
+    const status = JSON.parse(printed.join("\n")) as Json;
     assert.equal(status.codebuddy, true);
-
-    // upstream-only 下报告生效值 false，并单独报出原始配置。
-    await runCli(["config", "--codebuddy", "on"]);
-    const upstreamOnlyConfig = { ...JSON.parse(fs.readFileSync(gatewayConfig, "utf8")), upstreamOnly: true };
-    fs.writeFileSync(gatewayConfig, JSON.stringify(upstreamOnlyConfig));
-    printed.length = 0;
-    await runCli(["config"]);
-    status = JSON.parse(printed.join("\n")) as Json;
-    assert.equal(status.codebuddy, false, "状态输出必须报告生效值");
-    assert.equal(status.codebuddyConfigured, true, "原始开关与生效值不一致时单独报出");
 
     await assert.rejects(runCli(["config", "--codebuddy", "maybe"]), /on or off/);
     await assert.rejects(runCli(["config", "--codebuddy-region", "us"]), /auto, cn, or intl/);

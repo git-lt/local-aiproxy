@@ -1,42 +1,32 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ApiError,
-  applyUpstreamModels,
+  getProviderModels,
   getUiConfig,
   getUiStatus,
   postUiConfig,
-  restartCodexAppServers,
   type UiConfig,
   type UiConfigChanges,
+  type UiProviderModels,
   type UiStatus,
 } from "./api.ts";
 import { Header } from "./Header.tsx";
-import { ModelPicker } from "./ModelPicker.tsx";
-import { useI18n } from "./i18n.tsx";
+import { useI18n, type I18nKey } from "./i18n.tsx";
 import { isValidRequestLogCount, LOG_SIZE_UNITS, parseLogSizeField, splitLogSize, type LogSizeUnit } from "./log-size-field.ts";
 
 /** 表单态：数值/大小字段保持字符串，与服务端 CLI 解析规则一致。 */
 interface FormState {
   zcode: boolean;
   codebuddy: boolean;
+  cline: boolean;
+  qodercn: boolean;
   requestLogging: boolean;
   maxRequestLogs: string;
   maxGatewayLogBytes: string;
   maxGatewayLogUnit: LogSizeUnit;
-  /** 当前勾选的上游模型；与 config.editable.selectedModels 按集合比较。 */
-  selectedModels: string[];
 }
 
 type SavePhase = "idle" | "confirm" | "saving" | "restarting" | "failed";
-
-interface CodexNotice {
-  kind: "ok" | "warn" | "error";
-  text: string;
-}
-
-function sameSelection(left: string[], right: string[]): boolean {
-  return [...left].sort().join("\u0000") === [...right].sort().join("\u0000");
-}
 
 function CopyButton({ text, title }: { text: string; title: string }) {
   const { t } = useI18n();
@@ -89,7 +79,26 @@ export function ConfigPage({
   const [phase, setPhase] = useState<SavePhase>("idle");
   const [saveError, setSaveError] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [codexNotice, setCodexNotice] = useState<CodexNotice | null>(null);
+  const [modelGroups, setModelGroups] = useState<UiProviderModels | null>(null);
+  const [modelsLoading, setModelsLoading] = useState(false);
+  const [modelsError, setModelsError] = useState<string | null>(null);
+  const [runtimeOpen, setRuntimeOpen] = useState(false);
+
+  const loadModels = useCallback((): void => {
+    setModelsLoading(true);
+    setModelsError(null);
+    getProviderModels()
+      .then((next) => setModelGroups(next))
+      .catch((cause: unknown) => {
+        if (cause instanceof ApiError && cause.status === 401) {
+          onAuthExpired();
+          return;
+        }
+        setModelsError(cause instanceof Error ? cause.message : String(cause));
+      })
+      .finally(() => setModelsLoading(false));
+  }, [onAuthExpired]);
+  useEffect(loadModels, [loadModels]);
 
   const loadConfig = useCallback((): void => {
     setLoadError(null);
@@ -99,11 +108,12 @@ export function ConfigPage({
       setForm({
         zcode: next.editable.zcode,
         codebuddy: next.editable.codebuddy,
+        cline: next.editable.cline,
+        qodercn: next.editable.qodercn,
         requestLogging: next.editable.requestLogging,
         maxRequestLogs: String(next.editable.maxRequestLogs ?? 0),
         maxGatewayLogBytes: logSize.value,
         maxGatewayLogUnit: logSize.unit,
-        selectedModels: next.editable.selectedModels,
       });
     }).catch((cause: unknown) => {
       if (cause instanceof ApiError && cause.status === 401) {
@@ -115,25 +125,76 @@ export function ConfigPage({
   }, [onAuthExpired]);
   useEffect(loadConfig, [loadConfig]);
 
-  const modelsDirty = Boolean(config && form
-    && !sameSelection(form.selectedModels, config.editable.selectedModels));
   const logSize = form ? parseLogSizeField(form.maxGatewayLogBytes, form.maxGatewayLogUnit) : null;
   const invalidLogSize = form !== null && logSize === null;
   const invalidRequestLogCount = form !== null && !isValidRequestLogCount(form.maxRequestLogs);
-  const genericDirty = useMemo(() => {
+  const dirty = useMemo(() => {
     if (!config || !form) return false;
     return form.zcode !== config.editable.zcode
       || form.codebuddy !== config.editable.codebuddy
+      || form.cline !== config.editable.cline
+      || form.qodercn !== config.editable.qodercn
       || form.requestLogging !== config.editable.requestLogging
       || form.maxRequestLogs !== String(config.editable.maxRequestLogs ?? 0)
       || parseLogSizeField(form.maxGatewayLogBytes, form.maxGatewayLogUnit)?.bytes !== (config.editable.maxGatewayLogBytes ?? 0);
   }, [config, form]);
-  const dirty = modelsDirty || genericDirty;
-  const upstreamOnly = config?.readonly.upstreamOnly === true;
   // 开关按本机配置探测结果显示：未检测到本地配置时隐藏，避免展示永远无法生效的入口；
   // 开关已开启时（例如用户删掉了本机配置）仍显示，便于在 UI 里关回。
   const showZcode = Boolean(config && (config.detected.zcode || config.editable.zcode));
   const showCodebuddy = Boolean(config && (config.detected.codebuddy || config.editable.codebuddy));
+  const showCline = Boolean(config && (config.detected.cline || config.editable.cline));
+  const showQodercn = Boolean(config && (config.detected.qodercn || config.editable.qodercn));
+  // provider 开关的展示元数据：新增 provider 只需在这里登记一条，渲染与文案都随之生效。
+  const providerGroups = [
+    { key: "zcode", visible: showZcode, label: "labelZcode", hint: "zcodeMissingHint" },
+    { key: "codebuddy", visible: showCodebuddy, label: "labelCodebuddy", hint: "codebuddyMissingHint" },
+    { key: "cline", visible: showCline, label: "labelCline", hint: "clineMissingHint" },
+    { key: "qodercn", visible: showQodercn, label: "labelQodercn", hint: "qodercnMissingHint" },
+  ] as const satisfies readonly { key: keyof FormState; visible: boolean; label: I18nKey; hint: I18nKey }[];
+  // 模型白名单：`*` 全部放行；否则只放行名单内的 slug（不区分大小写）。
+  // 缺省/空 = 全部模型开关默认关闭。
+  const enabledSet = useMemo(
+    () => new Set((config?.editable.enabledModels ?? []).map((slug) => slug.toLowerCase())),
+    [config],
+  );
+  const allModelsEnabled = enabledSet.has("*");
+
+  /**
+   * 模型级开关：立即保存 enabledModels 白名单（可能触发网关重启，由轮询恢复）。
+   * 白名单为 `*`（全部放行）时关闭某个模型，会展开为「除它之外的全部已知模型」。
+   */
+  const toggleModel = (slug: string, allKnownSlugs: string[]): void => {
+    if (!config || phase === "saving" || phase === "restarting") return;
+    const current = config.editable.enabledModels ?? [];
+    const key = slug.toLowerCase();
+    let next: string[];
+    if (allModelsEnabled) {
+      next = allKnownSlugs.filter((item) => item.toLowerCase() !== key);
+    } else if (current.some((item) => item.toLowerCase() === key)) {
+      next = current.filter((item) => item.toLowerCase() !== key);
+    } else {
+      next = [...current, slug];
+    }
+    setPhase("saving");
+    setSaveError(null);
+    postUiConfig({ enabledModels: next })
+      .then((result) => {
+        if (result.restarting) setPhase("restarting");
+        else {
+          setPhase("idle");
+          loadConfig();
+          loadModels();
+        }
+      })
+      .catch((cause: unknown) => {
+        if (cause instanceof ApiError && cause.status === 401) {
+          onAuthExpired();
+          return;
+        }
+        setSaveError(cause instanceof Error ? cause.message : String(cause));
+        setPhase("failed");
+      });
+  };
 
   /** 网关重启完成后恢复：刷新配置与状态并提示已生效。 */
   useEffect(() => {
@@ -144,6 +205,7 @@ export function ConfigPage({
           onStatusChange(next);
           setPhase("idle");
           loadConfig();
+          loadModels();
         })
         .catch((cause: unknown) => {
           // 重启窗口期内 healthz 失败是预期行为，继续轮询；令牌失效例外，须回到输入框。
@@ -151,42 +213,23 @@ export function ConfigPage({
         });
     }, 1000);
     return () => window.clearInterval(timer);
-  }, [phase, loadConfig, onStatusChange, onAuthExpired]);
+  }, [phase, loadConfig, loadModels, onStatusChange, onAuthExpired]);
 
   /**
-   * 保存序列：先重建模型目录并写入 selectedModels（模型选择走专用端点，目录文件与
-   * 配置必须一起变更），再写其余配置（可能触发网关重启，由轮询恢复），最后按用户在
-   * 弹窗里的选择决定是否停止 Codex app-server（Codex 重新拉起后加载新目录）。
+   * 保存序列：写其余配置（可能触发网关重启，由轮询恢复）。模型列表跟随本机
+   * ZCode/CodeBuddy 登录态，无独立选择项。
    */
-  const save = (restartCodex = false): void => {
+  const save = (): void => {
     if (!config || !form || !logSize || invalidRequestLogCount) return;
     const formSnapshot = form;
     setPhase("saving");
     setSaveError(null);
-    setCodexNotice(null);
     const run = async (): Promise<"restarting" | "done"> => {
-      if (!sameSelection(formSnapshot.selectedModels, config.editable.selectedModels)) {
-        const result = await applyUpstreamModels(formSnapshot.selectedModels);
-        setCodexNotice({
-          kind: result.upstreamOnly ? "warn" : "ok",
-          text: result.upstreamOnly ? t("modelsSavedUpstreamOnly") : t("modelsSavedDynamic"),
-        });
-        if (restartCodex) {
-          setCodexNotice({ kind: "warn", text: t("codexRestarting") });
-          const stop = await restartCodexAppServers();
-          setCodexNotice({
-            kind: stop.results.some(({ status }) => status !== "stopped") ? "error" : "ok",
-            text: stop.results.length === 0
-              ? t("codexRestartNone")
-              : stop.results.every(({ status }) => status === "stopped")
-              ? t("codexRestartDone")
-              : t("codexRestartFailed"),
-          });
-        }
-      }
       const changes: UiConfigChanges = {};
       if (formSnapshot.zcode !== config.editable.zcode) changes.zcode = formSnapshot.zcode;
       if (formSnapshot.codebuddy !== config.editable.codebuddy) changes.codebuddy = formSnapshot.codebuddy;
+      if (formSnapshot.cline !== config.editable.cline) changes.cline = formSnapshot.cline;
+      if (formSnapshot.qodercn !== config.editable.qodercn) changes.qodercn = formSnapshot.qodercn;
       if (formSnapshot.requestLogging !== config.editable.requestLogging) {
         changes.requestLogging = formSnapshot.requestLogging;
       }
@@ -235,12 +278,6 @@ export function ConfigPage({
           {phase === "saving" ? t("saving") : t("savedRestarting")}
         </div>
       )}
-      {codexNotice && (
-        <div className={`restart-banner${codexNotice.kind === "error" ? " error" : ""}`}>
-          <span className="status-dot" />
-          {codexNotice.text}
-        </div>
-      )}
       {phase === "failed" && saveError && (
         <div className="restart-banner error">
           {t("saveFailed")}: {saveError}
@@ -260,235 +297,186 @@ export function ConfigPage({
       )}
       <main className="content-container">
         <section className="card">
-          <div className="card-header">
+          <div className="card-header" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <div className="card-title-group">
+              <h2 className="card-title">{t("cardProvidersTitle")}</h2>
+              <span className="card-badge badge-editable">{t("badgeEditable")}</span>
+            </div>
+            <button
+              className="btn btn-secondary"
+              style={{ padding: "4px 10px", fontSize: 11 }}
+              disabled={modelsLoading}
+              onClick={loadModels}
+            >
+              {modelsLoading ? t("saving") : t("refresh")}
+            </button>
+          </div>
+          <div className="card-body">
+            {modelsError && (
+              <div className="restart-banner error" style={{ marginBottom: 12 }}>
+                <span>{t("loadFailed")}: {modelsError}</span>
+                <button className="btn btn-secondary" style={{ padding: "4px 10px", fontSize: 11 }} onClick={loadModels}>{t("retry")}</button>
+              </div>
+            )}
+            {providerGroups.map((group) => {
+              if (!group.visible) return null;
+              const label = t(group.label);
+              const hint = t(group.hint);
+              const enabled = form?.[group.key] ?? false;
+              const detected = config?.detected[group.key] ?? false;
+              // 关闭的 provider 不展示其模型列表与提示，避免列表与开关状态不一致。
+              const slugs = enabled ? modelGroups?.[group.key] ?? [] : [];
+              const allKnownSlugs = providerGroups.flatMap((entry) => modelGroups?.[entry.key] ?? []);
+              return (
+                <div className="field-row" key={group.key}>
+                  <div className="field-label-group">
+                    <span className="field-label">{label}</span>
+                  </div>
+                  <div className="field-control-area">
+                    <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                      <label className="switch">
+                        <input
+                          type="checkbox"
+                          checked={enabled}
+                          disabled={!config || !form}
+                          onChange={(event) => setForm(form ? { ...form, [group.key]: event.target.checked } : form)}
+                        />
+                        <span className="slider" />
+                      </label>
+                      {enabled && <span className="field-keyname">{slugs.length}</span>}
+                    </div>
+                    {enabled && !detected && <p className="field-desc zcode-disabled-hint">{hint}</p>}
+                    {enabled && (slugs.length === 0
+                      ? <p className="field-desc">{t("modelsEmpty")}</p>
+                      : (
+                        <div style={{ maxHeight: 200, overflowY: "auto", scrollbarGutter: "stable", paddingRight: 6, marginTop: 8, display: "flex", flexDirection: "column", gap: 2 }}>
+                          {slugs.map((slug) => {
+                            const off = !allModelsEnabled && !enabledSet.has(slug.toLowerCase());
+                            return (
+                              <div key={slug} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, padding: "2px 0" }}>
+                                <code style={{ fontSize: 11.5, color: off ? "var(--fg-muted)" : "var(--fg-primary)" }}>{slug}</code>
+                                <label
+                                  className="switch"
+                                  style={{ transform: "scale(0.72)", transformOrigin: "right center", margin: 0 }}
+                                  title={slug}
+                                >
+                                  <input type="checkbox" checked={!off} onChange={() => toggleModel(slug, allKnownSlugs)} />
+                                  <span className="slider" />
+                                </label>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      ))}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </section>
+
+        <section className="card">
+          <div
+            className="card-header"
+            style={{ display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer", userSelect: "none" }}
+            onClick={() => setRuntimeOpen((open) => !open)}
+          >
             <div className="card-title-group">
               <h2 className="card-title">{t("card1Title")}</h2>
               <span className="card-badge badge-editable">{t("badgeEditable")}</span>
             </div>
+            <svg
+              style={{ width: 14, height: 14, color: "var(--fg-muted)", transform: runtimeOpen ? "rotate(180deg)" : "none", transition: "transform 0.15s", flexShrink: 0 }}
+              viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
+            >
+              <polyline points="6 9 12 15 18 9" />
+            </svg>
           </div>
-          <div className="card-body">
-            {config && form && (
-              <>
-                <div className="field-row">
-                  <div className="field-label-group">
-                    <span className="field-label">{t("labelReqLogging")}</span>
-                    <span className="field-keyname">requestLogging</span>
-                  </div>
-                  <div className="field-control-area">
-                    <label className="switch">
-                      <input
-                        type="checkbox"
-                        checked={form.requestLogging}
-                        onChange={(event) =>
-                          setForm({ ...form, requestLogging: event.target.checked })}
-                      />
-                      <span className="slider" />
-                    </label>
-                    <p className="field-desc">{t("descReqLogging")}</p>
-                    {form.requestLogging && (
-                      <div className="log-dir-line">
-                        <code>{config.editable.logDir}</code>
-                        <span className="field-desc">{t("pathNote")}</span>
-                      </div>
-                    )}
-                  </div>
+          {runtimeOpen && config && form && (
+            <div className="card-body">
+              <div className="field-row">
+                <div className="field-label-group">
+                  <span className="field-label">{t("labelReqLogging")}</span>
+                  <span className="field-keyname">requestLogging</span>
                 </div>
-                <div className="field-row">
-                  <div className="field-label-group">
-                    <span className="field-label">{t("labelMaxReqLogs")}</span>
-                    <span className="field-keyname">maxRequestLogs</span>
-                  </div>
-                  <div className="field-control-area">
+                <div className="field-control-area">
+                  <label className="switch">
+                    <input
+                      type="checkbox"
+                      checked={form.requestLogging}
+                      onChange={(event) =>
+                        setForm({ ...form, requestLogging: event.target.checked })}
+                    />
+                    <span className="slider" />
+                  </label>
+                  <p className="field-desc">{t("descReqLogging")}</p>
+                  {form.requestLogging && (
+                    <div className="log-dir-line">
+                      <code>{config.editable.logDir}</code>
+                      <span className="field-desc">{t("pathNote")}</span>
+                    </div>
+                  )}
+                </div>
+              </div>
+              <div className="field-row">
+                <div className="field-label-group">
+                  <span className="field-label">{t("labelMaxReqLogs")}</span>
+                  <span className="field-keyname">maxRequestLogs</span>
+                </div>
+                <div className="field-control-area">
+                  <input
+                    type="number"
+                    className="input-number"
+                    min={0}
+                    max={1000}
+                    step={10}
+                    required
+                    aria-label={t("labelMaxReqLogs")}
+                    aria-invalid={invalidRequestLogCount}
+                    aria-describedby={invalidRequestLogCount ? "request-log-count-error" : undefined}
+                    value={form.maxRequestLogs}
+                    onChange={(event) => setForm({ ...form, maxRequestLogs: event.target.value })}
+                  />
+                  <p className="field-desc">{t("descMaxReqLogs")}</p>
+                  {invalidRequestLogCount && <p id="request-log-count-error" className="field-desc error-text" role="alert">{t("requestLogCountInvalid")}</p>}
+                </div>
+              </div>
+              <div className="field-row">
+                <div className="field-label-group">
+                  <span className="field-label">{t("labelMaxGwBytes")}</span>
+                  <span className="field-keyname">maxGatewayLogBytes</span>
+                </div>
+                <div className="field-control-area">
+                  <div className="log-size-control">
                     <input
                       type="number"
                       className="input-number"
                       min={0}
-                      max={1000}
-                      step={10}
+                      max={1024}
+                      step="any"
                       required
-                      aria-label={t("labelMaxReqLogs")}
-                      aria-invalid={invalidRequestLogCount}
-                      aria-describedby={invalidRequestLogCount ? "request-log-count-error" : undefined}
-                      value={form.maxRequestLogs}
-                      onChange={(event) => setForm({ ...form, maxRequestLogs: event.target.value })}
+                      aria-label={t("labelMaxGwBytes")}
+                      aria-invalid={invalidLogSize}
+                      aria-describedby={invalidLogSize ? "log-size-error" : undefined}
+                      value={form.maxGatewayLogBytes}
+                      onChange={(event) => setForm({ ...form, maxGatewayLogBytes: event.target.value })}
                     />
-                    <p className="field-desc">{t("descMaxReqLogs")}</p>
-                    {invalidRequestLogCount && <p id="request-log-count-error" className="field-desc error-text" role="alert">{t("requestLogCountInvalid")}</p>}
+                    <select
+                      className="input-text"
+                      aria-label={t("logSizeUnit")}
+                      value={form.maxGatewayLogUnit}
+                      onChange={(event) => setForm({ ...form, maxGatewayLogUnit: event.target.value as LogSizeUnit })}
+                    >
+                      {LOG_SIZE_UNITS.map((unit) => <option key={unit} value={unit}>{unit}</option>)}
+                    </select>
                   </div>
+                  <p className="field-desc">{t("descMaxGwBytes")}</p>
+                  {invalidLogSize && <p id="log-size-error" className="field-desc error-text" role="alert">{t("logSizeInvalid")}</p>}
                 </div>
-                <div className="field-row">
-                  <div className="field-label-group">
-                    <span className="field-label">{t("labelMaxGwBytes")}</span>
-                    <span className="field-keyname">maxGatewayLogBytes</span>
-                  </div>
-                  <div className="field-control-area">
-                    <div className="log-size-control">
-                      <input
-                        type="number"
-                        className="input-number"
-                        min={0}
-                        max={1024}
-                        step="any"
-                        required
-                        aria-label={t("labelMaxGwBytes")}
-                        aria-invalid={invalidLogSize}
-                        aria-describedby={invalidLogSize ? "log-size-error" : undefined}
-                        value={form.maxGatewayLogBytes}
-                        onChange={(event) => setForm({ ...form, maxGatewayLogBytes: event.target.value })}
-                      />
-                      <select
-                        className="input-text"
-                        aria-label={t("logSizeUnit")}
-                        value={form.maxGatewayLogUnit}
-                        onChange={(event) => setForm({ ...form, maxGatewayLogUnit: event.target.value as LogSizeUnit })}
-                      >
-                        {LOG_SIZE_UNITS.map((unit) => <option key={unit} value={unit}>{unit}</option>)}
-                      </select>
-                    </div>
-                    <p className="field-desc">{t("descMaxGwBytes")}</p>
-                    {invalidLogSize && <p id="log-size-error" className="field-desc error-text" role="alert">{t("logSizeInvalid")}</p>}
-                  </div>
-                </div>
-                <div className="field-row">
-                  <div className="field-label-group">
-                    <span className="field-label">{t("labelModelSelect")}</span>
-                    <span className="field-keyname">selectedModels</span>
-                  </div>
-                  <div className="field-control-area">
-                    <ModelPicker
-                      selectedModels={form.selectedModels}
-                      onChange={(selectedModels) => setForm((current) =>
-                        current ? { ...current, selectedModels } : current)}
-                      onAuthExpired={onAuthExpired}
-                      disabled={phase === "saving" || phase === "restarting" || phase === "confirm"}
-                    />
-                  </div>
-                </div>
-                {showZcode && (
-                  <div className="field-row">
-                    <div className="field-label-group">
-                      <span className="field-label">{t("labelZcode")}</span>
-                      <span className="field-keyname">zcode</span>
-                    </div>
-                    <div className="field-control-area">
-                      {/* upstream-only 模式下网关按禁用处理 zcode 入口（zcodeEnabled）：
-                          开关值保留但不生效，UI 同步禁用，避免误以为已生效。 */}
-                      <label className={`switch${upstreamOnly ? " disabled" : ""}`}>
-                        <input
-                          type="checkbox"
-                          checked={form.zcode}
-                          disabled={upstreamOnly}
-                          onChange={(event) => setForm({ ...form, zcode: event.target.checked })}
-                        />
-                        <span className="slider" />
-                      </label>
-                      <p className="field-desc">{t("descZcode")}</p>
-                      {upstreamOnly && (
-                        <p className="field-desc zcode-disabled-hint">{t("zcodeDisabledHint")}</p>
-                      )}
-                      {!config.detected.zcode && (
-                        <p className="field-desc zcode-disabled-hint">{t("zcodeMissingHint")}</p>
-                      )}
-                    </div>
-                  </div>
-                )}
-                {showCodebuddy && (
-                  <div className="field-row">
-                    <div className="field-label-group">
-                      <span className="field-label">{t("labelCodebuddy")}</span>
-                      <span className="field-keyname">codebuddy</span>
-                    </div>
-                    <div className="field-control-area">
-                      {/* upstream-only 模式下网关按禁用处理 codebuddy 入口（codebuddyEnabled）：
-                          开关值保留但不生效，UI 同步禁用，避免误以为已生效。 */}
-                      <label className={`switch${upstreamOnly ? " disabled" : ""}`}>
-                        <input
-                          type="checkbox"
-                          checked={form.codebuddy}
-                          disabled={upstreamOnly}
-                          onChange={(event) => setForm({ ...form, codebuddy: event.target.checked })}
-                        />
-                        <span className="slider" />
-                      </label>
-                      <p className="field-desc">{t("descCodebuddy")}</p>
-                      {upstreamOnly && (
-                        <p className="field-desc zcode-disabled-hint">{t("codebuddyDisabledHint")}</p>
-                      )}
-                      {!config.detected.codebuddy && (
-                        <p className="field-desc zcode-disabled-hint">{t("codebuddyMissingHint")}</p>
-                      )}
-                    </div>
-                  </div>
-                )}
-              </>
-            )}
-          </div>
-        </section>
-
-        {config && (
-          <section className="card">
-            <div className="card-header">
-              <div className="card-title-group">
-                <h2 className="card-title">{t("card2Title")}</h2>
-                <span className="card-badge badge-readonly">{t("badgeReadonly")}</span>
               </div>
             </div>
-            <div className="card-note-bar">
-              <svg style={{ width: 14, height: 14, color: "#f59e0b", flexShrink: 0 }} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
-                <path d="M7 11V7a5 5 0 0 1 10 0v4" />
-              </svg>
-              <span>{t("card2Note")}</span>
-            </div>
-            <div className="card-body">
-              <ReadonlyRow label={t("labelRouterMode")} keyname="routerMode">
-                <div className="readonly-box">
-                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                    <span className={`pill-badge ${upstreamOnly ? "pill-purple" : "pill-green"}`}>
-                      {upstreamOnly ? t("badgePureUpstream") : t("badgeDynamicRouting")}
-                    </span>
-                  </div>
-                  <span style={{ fontSize: 11, color: "var(--fg-muted)" }}>
-                    {upstreamOnly ? t("descPureUpstream") : t("descUpstreamOnly")}
-                  </span>
-                </div>
-              </ReadonlyRow>
-              <ReadonlyRow label={t("labelUpstreamUrl")} keyname="upstreamBaseUrl">
-                <div className="readonly-box">
-                  <span>{config.readonly.upstreamBaseUrl}</span>
-                  <CopyButton text={config.readonly.upstreamBaseUrl} title="Copy URL" />
-                </div>
-              </ReadonlyRow>
-              <ReadonlyRow label={t("labelUpstreamType")} keyname="upstreamType">
-                <div className="readonly-box">
-                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                    <span style={{ color: "var(--fg-primary)", fontWeight: 600 }}>{config.readonly.upstreamType}</span>
-                    <span className="pill-badge pill-cyan">active</span>
-                  </div>
-                  <span style={{ fontSize: 11, color: "var(--fg-muted)" }}>{t("hintOtherType")}</span>
-                </div>
-              </ReadonlyRow>
-              <ReadonlyRow label={t("labelHostPort")} keyname="host / port">
-                <div className="readonly-box">
-                  <span>{config.readonly.host} : {config.readonly.port}</span>
-                  <span className="pill-badge pill-purple">{t("badgeLoopback")}</span>
-                </div>
-              </ReadonlyRow>
-              <ReadonlyRow label={t("labelPrefix")} keyname="prefix">
-                <div className="readonly-box">
-                  <code style={{ color: "var(--accent)", fontWeight: 600 }}>{config.readonly.prefix}</code>
-                  <span style={{ fontSize: 11, color: "var(--fg-muted)" }}>{t("descPrefix")}</span>
-                </div>
-              </ReadonlyRow>
-              <ReadonlyRow label={t("labelCatalogPath")} keyname="catalogPath">
-                <div className="readonly-box">
-                  <span style={{ fontSize: 11.5 }}>{config.readonly.catalogPath}</span>
-                  <CopyButton text={config.readonly.catalogPath} title="Copy Path" />
-                </div>
-              </ReadonlyRow>
-            </div>
-          </section>
-        )}
+          )}
+        </section>
       </main>
 
       {phase === "confirm" && config && form && (
@@ -500,26 +488,16 @@ export function ConfigPage({
                 <line x1="12" y1="9" x2="12" y2="13" />
                 <line x1="12" y1="17" x2="12.01" y2="17" />
               </svg>
-              <span>{modelsDirty ? t("modalTitleModels") : t("modalTitle")}</span>
+              <span>{t("modalTitle")}</span>
             </div>
-            <p className="modal-body">
-              {[
-                modelsDirty
-                  ? upstreamOnly ? t("modalBodyModelsUpstreamOnly") : t("modalBodyModelsDynamic")
-                  : null,
-                genericDirty ? t("modalBody") : null,
-              ].filter(Boolean).join(" ") || t("modalBody")}
-            </p>
+            <p className="modal-body">{t("modalBody")}</p>
             <div className="modal-actions">
               <button className="btn btn-secondary" onClick={() => setPhase("idle")}>{t("cancel")}</button>
-              {modelsDirty && upstreamOnly && (
-                <button className="btn btn-secondary" onClick={() => save(false)}>{t("modalSkipRestart")}</button>
-              )}
               <button
                 className="btn btn-save dirty"
-                onClick={() => save(modelsDirty && upstreamOnly)}
+                onClick={() => save()}
               >
-                {modelsDirty && upstreamOnly ? t("modalRestartCodex") : t("confirm")}
+                {t("confirm")}
               </button>
             </div>
           </div>

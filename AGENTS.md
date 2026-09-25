@@ -2,15 +2,16 @@
 
 ## 项目结构与模块组织
 
-本项目是跨平台的 Bun/TypeScript CLI 网关；基于 launchd/LaunchAgent 的自动安装与服务管理仅适用于 macOS。业务源码位于 `src/`：
+本项目是跨平台的 Bun/TypeScript CLI 网关；基于 launchd/LaunchAgent 的服务管理（`start`/`stop`/`restart`/`uninstall`）仅适用于 macOS，其余平台用 `serve` 前台运行。业务源码位于 `src/`：
 
 - `cli.ts`：CLI 命令编排。
-- `gateway.ts`：模型端口的路由与转发。
+- `gateway.ts`：模型端口的路由与转发；只服务本机 ZCode 与 CodeBuddy/WorkBuddy，
+  没有第三方上游，也没有官方 ChatGPT 回落。
 - `zcode/`：ZCode 配置缓存、目录、协议转换与网关适配。
 - `codebuddy/`：CodeBuddy/WorkBuddy 凭据只读消费、目录拉取与双向协议转换。
-- `catalog.ts`、`models.ts`：模型目录。
-- `upstream-catalog.ts`：CLI 与 Web UI 共享的上游目录拉取与已选目录重建（webui 的依赖树不得反向引用 `cli.ts`）。
-- `keychain.ts`：上游 API key 的平台分派存储（darwin → macOS Keychain，其余平台 → 凭据文件后端）。
+- `cline/`：Cline 官方 API 适配（凭据为运行时目录的 `cline-api-key` 文件，目录来自公开 `/models`）。
+- `qodercn/`：QoderCN 远端 API 适配（凭据为本机 QoderCN/通义灵码客户端登录缓存，只读解密，不连 IPC）。
+- `catalog.ts`：模型目录。
 - `webui.ts`：内建 Web 配置界面 `/ui`（React 源码在 `src/ui/`，改动 UI 后须重跑 `bun run build:ui`）。
 - `config-update.ts`：CLI `config` 命令与 Web UI 共享的配置解析/写入/审计路径。
 - `launchd.ts`、`toml.ts`：其余系统集成。
@@ -46,9 +47,14 @@
 ## 安全与配置红线
 
 - 不得提交 API 密钥、OAuth 令牌、Keychain 内容、`credentials.json` 或本机 `~/.codex` 配置。
-- 上游 API key 的存取必须走 `keychain.ts` 的分派，不得绕过它直接读 Keychain 或凭据文件；损坏的 credentials.json 要报带路径与重建指引的错误，不静默当作缺失。
+- 网关不持有任何上游 API key：ZCode/CodeBuddy 的凭据只从本机客户端登录态**只读**消费，禁止引入 Keychain 或凭据文件后端。
 - 禁止在日志、Web UI 或任何 API 响应中读取、展示或外发凭据；URL 的 query 可能携带 token，对外展示（审计与 `/ui/api/*` 响应）一律按 `sanitizeUrlValue` 只保留 origin 与路径；修改日志时继续遮蔽敏感请求头。
-- 转发到 CLIProxy 前必须移除 ChatGPT OAuth。
-- 安装、卸载及配置写入逻辑必须保留备份、原子写入和「只修改受管字段」的行为。
+- 不得读写 `$CODEX_HOME` 下的任何文件（`config.toml`、`models_cache.json`、`cliproxy-catalog.json` 等）：
+  Codex 侧接线（`openai_base_url`、`model_catalog_json`、Realtime base url）与目录缓存都由
+  Codex 自己维护，网关只写自己的 `~/.codex-cliproxy-gateway/*`。
+  允许的例外只有**只读**：`status` 展示 Codex 侧 4 个键。
+  修改代码时不要把任何写操作落到 `paths.codexHome` 之下。
+- 写 `~/.codex-cliproxy-gateway/config.json`、`state.json` 与目录文件必须保留备份（如需）与
+  原子写入，并且只修改受管字段。
 - 修改 `~/.codex-cliproxy-gateway/config.json` 的字段、默认值、类型或校验规则时，必须同步更新 `schemas/gateway-config.schema.json`，并补充或调整对应测试。
 - Web UI 与模型流量结构性隔离（独立端口、独立进程）；`/ui/api/*` 必须校验 ui-token 与 Host/Origin 白名单；改动路由时不得破坏模型端口对 `/ui` 前缀及 mountPath 子树外的本地 404 边界。

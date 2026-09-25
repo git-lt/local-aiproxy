@@ -36,8 +36,6 @@ export interface CodebuddyDependencies {
   credentialCache?: CodebuddyCredentialCache;
   /** 目录缓存目录（每个产品×地域接口各一个 `{codebuddy|workbuddy}-{cn|intl}-catalog.json`）；缺省取 catalogPath 同目录。 */
   cacheDirectory?: string;
-  /** Codex 自己的目录缓存；目录内容变化时过期它。 */
-  codexModelsCacheFile?: string;
   fetch?: (url: string, init: RequestInit) => Promise<Response>;
   /** 目录刷新间隔（毫秒）；测试可调小，生产缺省 16 分钟。 */
   catalogRefreshIntervalMs?: number;
@@ -58,7 +56,7 @@ const DEFAULT_CATALOG_REFRESH_INTERVAL_MS = 16 * 60 * 1000;
  * 缓存、不拦截请求，也不施加环回监听与前缀保留约束（语义与 zcodeEnabled 一致）。
  */
 export function codebuddyEnabled(config: GatewayConfig): boolean {
-  return config.codebuddy === true && config.upstreamOnly !== true;
+  return config.codebuddy === true;
 }
 
 export function validateCodebuddyConfig(config: GatewayConfig): void {
@@ -67,22 +65,10 @@ export function validateCodebuddyConfig(config: GatewayConfig): void {
     throw new Error("codebuddyRegion 必须是 auto、cn 或 intl");
   }
   if (!codebuddyEnabled(config)) return;
+  // 凭据从本机 CodeBuddy/WorkBuddy 登录文件里读，网关只该服务本机客户端。
   const host = config.host;
   if (!(host === "localhost" || host === "::1" || host === "[::1]" || (isIP(host) === 4 && host.startsWith("127.")))) {
     throw new Error("启用 CodeBuddy 时网关只能监听环回地址");
-  }
-  const reservedPrefixes = [
-    CODEBUDDY_PREFIX,
-    WORKBUDDY_PREFIX,
-    codebuddyFamilyPrefix("cn-cli"),
-    codebuddyFamilyPrefix("cn-work"),
-    codebuddyFamilyPrefix("intl-cli"),
-    codebuddyFamilyPrefix("intl-work"),
-  ];
-  for (const reserved of reservedPrefixes) {
-    if (config.prefix && (reserved.startsWith(config.prefix) || config.prefix.startsWith(reserved))) {
-      throw new Error(`启用 CodeBuddy 时 ${reserved} 前缀保留给 CodeBuddy/WorkBuddy，请调整第三方 prefix`);
-    }
   }
 }
 
@@ -107,13 +93,11 @@ export function createCodebuddyAdapter(config: GatewayConfig, dependencies: Code
       cacheDirectory: dependencies.cacheDirectory ?? path.dirname(config.catalogPath),
       // 目录刷新按 codebuddyRegion/auto 选择地域；请求路由则始终以带地域 slug 为准。
       credentials: async () => {
+        // WorkBuddy（work 产品）暂不拉取模型：目录与转发都只服务 CodeBuddy（cli）。
         const list = [];
-        for (const product of ["cli", "work"] as const) {
-          try { list.push(await credentialCache!.forProduct(product)); } catch { /* 配置地域缺失时由另一产品/auto 兜底。 */ }
-        }
+        try { list.push(await credentialCache!.forProduct("cli")); } catch { /* 配置地域缺失时由 auto 兜底。 */ }
         return list;
       },
-      ...(dependencies.codexModelsCacheFile ? { codexModelsCacheFile: dependencies.codexModelsCacheFile } : {}),
       fetch: (url, init) => fetchUpstream(url, init),
     })
     : undefined;
@@ -246,7 +230,11 @@ export function createCodebuddyAdapter(config: GatewayConfig, dependencies: Code
         // 前缀同时决定产品接口与地域；旧的无地域前缀直接拒绝。
         const product = codebuddyModelProduct(input.model);
         const region = codebuddyModelRegion(input.model);
-        if (product) family = product === "work" ? "workbuddy" : "codebuddy";
+        if (product === "work") {
+          cleanup();
+          return fail(404, "WorkBuddy 模型暂不提供服务；请使用 codebuddy-cn/ 或 codebuddy-intl/ 前缀的模型");
+        }
+        if (product) family = "codebuddy";
         if (!product || !region) {
           cleanup();
           return fail(400, "CodeBuddy 模型名必须使用 codebuddy-cn/、codebuddy-intl/、workbuddy-cn/ 或 workbuddy-intl/ 前缀");

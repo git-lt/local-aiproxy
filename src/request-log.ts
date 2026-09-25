@@ -15,7 +15,7 @@ export interface RequestLogSink {
 }
 
 const LOG_PREFIX = "cliproxy";
-export type LogNamespace = "cliproxy" | "zai" | "bigmodel" | "codebuddy" | "workbuddy";
+export type LogNamespace = "cliproxy" | "zai" | "bigmodel" | "codebuddy" | "workbuddy" | "cline" | "qodercn";
 
 const SENSITIVE_HEADERS = new Set([
   "authorization",
@@ -26,6 +26,11 @@ const SENSITIVE_HEADERS = new Set([
   "set-cookie",
   // Codex Realtime 会带上数 KB 的 attestation，属于凭据，不得明文落盘。
   "x-oai-attestation",
+  // QoderCN 的 cosy-* 头携带本机登录态派生出的凭据，同样属于密钥。
+  "cosy-key",
+  "cosy-user",
+  "cosy-machineid",
+  "cosy-machinetoken",
 ]);
 
 const pad = (value: number, width = 2): string => String(value).padStart(width, "0");
@@ -61,23 +66,9 @@ export interface LogFileRef {
   name: string;
 }
 
-function sanitizeSegment(value: string): string {
-  return value.replace(/[^A-Za-z0-9_-]/g, "_");
-}
-
 /** HTTP 请求：按秒滚动，与此前行为一致。 */
 export function httpLogFile(group: string, at = fileStamp(), namespace: LogNamespace = LOG_PREFIX): LogFileRef {
   return { name: `${namespace}-${group}-http-${at}.log` };
-}
-
-/**
- * WebSocket 连接：整条会话写同一个文件。
- * 用 session-id 而非 thread-id——多条连接（含 subagent 派生的 thread）共享同一 session，
- * 合并后文件数量大幅下降；缺失时回落到建连时刻。
- */
-export function websocketLogFile(group: string, sessionId?: string): LogFileRef {
-  const id = sanitizeSegment(sessionId ?? "").slice(0, 64) || fileStamp();
-  return { name: `${LOG_PREFIX}-${group}-ws-${id}.log` };
 }
 
 /**
@@ -87,7 +78,7 @@ export function websocketLogFile(group: string, sessionId?: string): LogFileRef 
  * 只用来判断"这个文件是不是请求日志"——保留策略按时间全局生效，不再需要分组。
  * 同时挡住 gateway.log 这类进程日志：logDir 被指到网关根目录时，它由 launchd 持有句柄，
  * 绝不能被请求日志的保留计数删掉。
- * `error-` 形仍被识别，是为了让旧的错误摘要文件按同一保留策略自然老化，而不是永远留下。
+ * `ws-` 形只用于识别旧安装留下的会话日志并按同一保留策略自然老化。
  */
 const REQUEST_LOG_NAME = /^(?:cliproxy|zai|bigmodel|codebuddy|workbuddy)-(?:error-\d{14}|.+-(?:http|ws)-[^/]+)\.log$/;
 
@@ -96,17 +87,7 @@ export function isRequestLogName(name: string): boolean {
 }
 
 /**
- * 进程内正在被写入的日志文件（绝对路径）→ 仍持有它的写入方计数。
- * WebSocket 会话是长生命周期的持续写入：文件在会话结束前一直被追加，
- * 若在会话中途被删，进程握着的 inode 还在写，日志却从目录里消失——静默丢一段会话。
- * 多个连接可能共享同一 session-id（即同一日志文件），因此按引用计数登记：
- * 任意一个连接关闭只递减计数，最后一个连接释放后才允许裁剪删除。
- */
-const activeLogCounts = new Map<string, number>();
-
-/**
  * 日志文件名只允许是日志目录内的普通文件名。
- * 会话 id 之类的外部输入已经过 sanitizeSegment，这里再兜一层边界校验：
  * 先要求是纯 basename（挡住 `..` 与路径分隔符），再把解析后的绝对路径与日志目录比对，
  * 确认目标仍落在目录内，绝不拼出目录外的路径。
  */
@@ -116,21 +97,6 @@ export function safeLogPath(dir: string, name: string): string | undefined {
   const target = path.resolve(root, name);
   if (target === root || !target.startsWith(root + path.sep)) return undefined;
   return target;
-}
-
-/** 登记一个持续写入的日志文件，返回幂等的释放函数；会话结束时必须调用。 */
-export function retainLogFile(dir: string, file: LogFileRef): () => void {
-  const target = safeLogPath(dir, file.name);
-  if (!target) return () => {};
-  activeLogCounts.set(target, (activeLogCounts.get(target) ?? 0) + 1);
-  let released = false;
-  return () => {
-    if (released) return;
-    released = true;
-    const remaining = (activeLogCounts.get(target) ?? 1) - 1;
-    if (remaining > 0) activeLogCounts.set(target, remaining);
-    else activeLogCounts.delete(target);
-  };
 }
 
 
@@ -152,7 +118,7 @@ export function pruneLogDir(dir: string, maxLogs: number): void {
   for (const name of names) {
     if (!isRequestLogName(name)) continue;
     const target = safeLogPath(dir, name);
-    if (!target || (activeLogCounts.get(target) ?? 0) > 0) continue;
+    if (!target) continue;
     try {
       candidates.push({ path: target, mtimeMs: fs.statSync(target).mtimeMs });
     } catch {
@@ -211,16 +177,6 @@ function headerLines(headers: Headers): string[] {
   return lines;
 }
 
-/** 给 WebSocket 握手头用：它不经过 logging wrapper，只能在事件里留痕，同样需要遮蔽凭据。 */
-export function maskedHeaders(headers: Record<string, string>): Record<string, string> {
-  const masked: Record<string, string> = {};
-  for (const [key, value] of Object.entries(headers)) {
-    masked[key] = SENSITIVE_HEADERS.has(key.toLowerCase()) ? "***" : value;
-  }
-  return masked;
-}
-
-
 export interface ExchangeEntry {
   requestTime: string;
   method: string;
@@ -269,30 +225,4 @@ export function logExchange(sink: RequestLogSink | undefined, group: string, ent
     ``,
   ];
   append(sink, httpLogFile(group, undefined, namespace), `${lines.join("\n")}\n`);
-}
-
-export interface RealtimeEntry {
-  event: string;
-  url: string;
-  detail?: Record<string, unknown>;
-  /** 文本帧传内容（完整，不截断），二进制帧传字节数。 */
-  frame?: string | number;
-}
-
-/** Realtime 的 call-create 与 WebSocket 生命周期事件。 */
-export function logRealtimeEvent(
-  sink: RequestLogSink | undefined,
-  file: LogFileRef,
-  entry: RealtimeEntry,
-): void {
-  if (!sink) return;
-  const detail = entry.detail && Object.keys(entry.detail).length > 0
-    ? ` ${JSON.stringify(entry.detail)}`
-    : "";
-  const frame = entry.frame === undefined
-    ? ""
-    : typeof entry.frame === "number"
-      ? ` <binary ${entry.frame}B>`
-      : ` ${entry.frame}`;
-  append(sink, file, `--${localTime()}-- [realtime] ${entry.event} ${entry.url}${detail}${frame}\n`);
 }

@@ -25,7 +25,6 @@ import {
 } from "../src/codebuddy/catalog.ts";
 import type { CodebuddyCredential } from "../src/codebuddy/credentials.ts";
 import { catalogRevision } from "../src/codebuddy/request-context.ts";
-import { invalidateModelsCache } from "../src/catalog.ts";
 
 function credential(profile: CodebuddyCredential["profile"]): CodebuddyCredential {
   const endpoints: Record<CodebuddyCredential["profile"], string> = {
@@ -307,13 +306,10 @@ test("dedupeCodebuddyCatalog 同名免费条目胜过付费条目", () => {
 test("目录存储：指纹与 TTL 命中不拉取，key 变化或内容被改即重建", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "cb-catalog-"));
   const cacheFile = path.join(directory, "codebuddy-intl-catalog.json");
-  const codexCache = path.join(directory, "models_cache.json");
-  fs.writeFileSync(codexCache, JSON.stringify({ fetched_at: new Date().toISOString(), client_version: "1.0.0", models: [{ slug: "x" }] }));
   let fetched = 0;
   let response = () => Response.json({ code: 0, msg: "OK", data: cliConfig([fixtureModel("a"), fixtureModel("b")], ["a", "b"]) });
   const store = createCodebuddyCatalogStore({
     cacheDirectory: directory,
-    codexModelsCacheFile: codexCache,
     credentials: async () => [credential("intl-cli")],
     fetch: async () => { fetched++; return response(); },
   });
@@ -322,8 +318,6 @@ test("目录存储：指纹与 TTL 命中不拉取，key 变化或内容被改�
     assert.equal(fetched, 1);
     assert.deepEqual(catalog.models.map((model) => model.slug), ["codebuddy-intl/a", "codebuddy-intl/b"]);
     assert.ok(fs.existsSync(cacheFile), "缓存按产品×地域命名落盘");
-    // 重建目录改变了 Codex 可见模型：它自己的缓存必须被过期。
-    assert.equal(JSON.parse(fs.readFileSync(codexCache, "utf8")).client_version, "0.0.0");
     // 双指纹命中：不再拉取。
     catalog = await store.catalog();
     assert.equal(fetched, 1);
@@ -650,20 +644,6 @@ test("目录存储：强制刷新忽略失败冷却", async () => {
     assert.equal(fetched, 2, "请求驱动在冷却内不重复重试");
     await store.refresh();
     assert.equal(fetched, 3, "定时/启动刷新不受冷却限制");
-  } finally {
-    fs.rmSync(directory, { recursive: true, force: true });
-  }
-});
-
-test("invalidateModelsCache 过期 Codex 目录缓存", () => {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "cb-catalog-inv-"));
-  try {
-    const file = path.join(directory, "models_cache.json");
-    fs.writeFileSync(file, JSON.stringify({ fetched_at: new Date().toISOString(), client_version: "1.2.3", models: [{ slug: "x" }] }));
-    invalidateModelsCache(file);
-    const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
-    assert.equal(parsed.client_version, "0.0.0");
-    assert.deepEqual(parsed.models, [{ slug: "x" }]);
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }

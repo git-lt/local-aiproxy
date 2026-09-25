@@ -1,45 +1,39 @@
 import fs from "node:fs";
 import path from "node:path";
 import { randomBytes } from "node:crypto";
-import { stopCodexAppServers } from "./app-server.ts";
-import { invalidateModelsCache } from "./catalog.ts";
 import { GATEWAY_CONFIG_VERSION } from "./config.ts";
 import {
-  applySelectedModelsPatch,
   applyWebUiConfigPatch,
   markPendingRestart,
-  parseSelectedModels,
   readGatewayConfigFile,
-  sanitizeUrlValue,
 } from "./config-update.ts";
 import { restartLaunchAgent } from "./launchd.ts";
 import { realPathOrResolve, resolvePaths } from "./paths.ts";
 import { isRequestLogName, safeLogPath } from "./request-log.ts";
 import { atomicWrite } from "./toml.ts";
 import { codebuddyCredentialsPresent, defaultAuthDirectory } from "./codebuddy/credentials.ts";
+import { createCodebuddyAdapter } from "./codebuddy/index.ts";
+import { clineCredentialsPresent } from "./cline/credentials.ts";
+import { qodercnCredentialsPresent } from "./qodercn/credentials.ts";
+import { createQodercnAdapter } from "./qodercn/index.ts";
 import { zcodeConfigPresent } from "./zcode/config.ts";
-import {
-  configuredUpstreamType,
-  fetchConfiguredUpstreamCatalog,
-  rebuildCatalog,
-} from "./upstream-catalog.ts";
+import { createZcodeAdapter } from "./zcode/index.ts";
+import { createClineAdapter } from "./cline/index.ts";
 import type { GatewayConfig, ResolvedPaths } from "./types.ts";
 
 /**
  * Web UI（/ui）服务端：网关的内建基础能力，运行在独立进程、独立端口（网关端口 + 1，
- * 见 webUiPort）：默认不启动，由 `codex-cliproxy web` 前台运行，或由 `web --daemon`
+ * 见 webUiPort）：默认不启动，由 `local-aiproxy web` 前台运行，或由 `web --daemon`
  * 拉起后台服务。与模型流量结构性隔离——模型端口的请求日志只含
- * 模型流量；UI 进程唯一的外呼是「拉取模型」的固定只读 GET {upstreamBaseUrl}/models
- * 与据此重建已选目录文件（经 keychain 分派取 key），不存在任意转发路径，也绝不把
- * key、URL query 写进日志或响应。
+ * 模型流量；UI 进程没有任何上游外呼，也绝不把 key、URL query 写进日志或响应。
  *
  * 安全边界（缺一不可）：
  * - 独立端口只绑定 loopback；网关 host 非 loopback 时不启动 UI 服务；
  * - Host 头白名单（127.0.0.1/localhost/[::1] + UI 端口），挡 DNS rebinding；
  * - Origin 头存在且非同源即拒绝；不输出任何 CORS 头；
- * - /ui/api/* 一律要求 x-ccp-ui-token 匹配 ~/.codex-cliproxy-gateway/ui-token（0600）。
+ * - /ui/api/* 一律要求 x-ccp-ui-token 匹配 ~/.local-aiproxy/ui-token（0600）。
  *
- * 除「拉取模型」外，UI 进程对 provider 侧只有本地存在性探测（zcodeConfigPresent /
+ * UI 进程对 provider 侧只有本地存在性探测（zcodeConfigPresent /
  * codebuddyCredentialsPresent）：只 fs.existsSync 判断 ~/.zcode 与 .info 是否存在，
  * 不打开、不解析、不返回凭据内容，响应里只有布尔值。
  */
@@ -52,6 +46,46 @@ const REQUEST_LOG_MAX_PAGE_SIZE = 500;
 /** 响应返回后再 kickstart，避免响应流被 SIGTERM 截断。 */
 const RESTART_DELAY_MS = 400;
 const UI_HTML_PATH = path.resolve(import.meta.dir, "../dist/ui/index.html");
+
+/** 各 provider 当前对外可见的模型清单（slug 列表）。 */
+export interface UiProviderModels {
+  zcode: string[];
+  codebuddy: string[];
+  cline: string[];
+  qodercn: string[];
+}
+
+/**
+ * 现场构建三个 adapter 拉取目录（用完即回收，不常驻）。本命令只看清单，
+ * 不要求对应开关已打开——先看清单再决定开哪个才是常见顺序。
+ * 单组失败不影响其余组：catch 后按空清单返回。
+ */
+export async function fetchProviderModels(config: GatewayConfig): Promise<UiProviderModels> {
+  const probe: GatewayConfig = { ...config, zcode: true, codebuddy: true, cline: true, qodercn: true };
+  const handleZcode = createZcodeAdapter(probe, {});
+  const handleCodebuddy = createCodebuddyAdapter(probe, { refreshCatalogOnStart: false });
+  const handleCline = createClineAdapter(probe, {});
+  const handleQodercn = createQodercnAdapter(probe, {});
+  try {
+    const [zcode, codebuddy, cline, qodercn] = await Promise.all([
+      handleZcode.catalog().catch(() => ({ models: [] })),
+      handleCodebuddy.catalog().catch(() => ({ models: [] })),
+      handleCline.catalog().catch(() => ({ models: [] })),
+      handleQodercn.catalog().catch(() => ({ models: [] })),
+    ]);
+    return {
+      zcode: zcode.models.map((model) => model.slug),
+      codebuddy: codebuddy.models.map((model) => model.slug),
+      cline: cline.models.map((model) => model.slug),
+      qodercn: qodercn.models.map((model) => model.slug),
+    };
+  } finally {
+    handleZcode.close();
+    handleCodebuddy.close();
+    handleCline.close();
+    handleQodercn.close();
+  }
+}
 
 export interface WebUiContext {
   paths: ResolvedPaths;
@@ -71,15 +105,11 @@ export interface WebUiContext {
   providerDeps?: {
     zcodeHome?: string;
     codebuddyAuthDir?: string;
+    clineApiKeyFile?: string;
+    qodercnHome?: string;
   };
-  /**
-   * 模型选择功能的测试注入点：上游 key 读取与「停止 Codex app-server」。
-   * 缺省分别走 keychain 分派的 readApiKey 与 stopCodexAppServers。
-   */
-  upstreamDeps?: {
-    readKey?: (optional?: boolean) => string;
-    stopCodexServers?: typeof stopCodexAppServers;
-  };
+  /** 模型清单来源（测试注入点）：缺省按当前配置现场构建三个 adapter 拉取。 */
+  providerModels?: () => Promise<UiProviderModels>;
 }
 
 /**
@@ -104,7 +134,7 @@ export function isLoopbackHost(host: string): boolean {
   return host === "127.0.0.1" || host === "localhost" || host === "::1" || host === "[::1]";
 }
 
-/** 读取（缺失时生成）Web UI 访问令牌；文件 0600，仅随 `codex-cliproxy web` 输出。 */
+/** 读取（缺失时生成）Web UI 访问令牌；文件 0600，仅随 `local-aiproxy web` 输出。 */
 export function ensureUiToken(file: string): string {
   try {
     const existing = fs.readFileSync(file, "utf8").trim();
@@ -222,7 +252,7 @@ export function webUiPort(config: GatewayConfig): number {
  * 不经过模型网关的任何路由、转发与日志包装。端口被占用时由 Bun.serve 抛错，
  * 调用方决定降级行为；网关 host 非 loopback 时返回 undefined（不提供远程面板）。
  *
- * 默认不随 `serve` 启动：由 `codex-cliproxy web`（包括其后台服务模式）调用。
+ * 默认不随 `serve` 启动：由 `local-aiproxy web`（包括其后台服务模式）调用。
  * 每个请求都从盘上重读配置（读失败回落启动快照），CLI 侧的 config 写入无需重启本进程。
  */
 export function startWebUiServer(config: GatewayConfig, ctx: WebUiContext): Bun.Server<undefined> | undefined {
@@ -288,24 +318,12 @@ function faviconResponse(): Response {
 }
 
 function statusResponse(config: GatewayConfig): Response {
-  const upstreamOnly = config.upstreamOnly === true;
-  // URL query 可能携带 token：对外展示与审计同规则，只保留 origin 与路径。
-  const upstreamBase = sanitizeUrlValue(config.upstreamBaseUrl);
-  const officialBase = sanitizeUrlValue(config.officialBaseUrl);
   return Response.json({
     ok: true,
     version: GATEWAY_CONFIG_VERSION,
     host: config.host,
     port: config.port,
-    prefix: config.prefix || "cliproxy/",
-    upstreamType: config.upstreamType === "newapi" ? "newapi" : "cliproxy",
-    upstreamOnly,
-    routing: upstreamOnly
-      ? [`all models -> ${upstreamBase}`]
-      : [
-        `native models -> ${officialBase}`,
-        `${config.prefix || "cliproxy/"}* -> ${upstreamBase}`,
-      ],
+    mountPath: config.mountPath,
   });
 }
 
@@ -315,53 +333,31 @@ function configResponse(paths: ResolvedPaths, providerDeps?: WebUiContext["provi
     editable: {
       zcode: live.zcode === true,
       codebuddy: live.codebuddy === true,
+      cline: live.cline === true,
+      qodercn: live.qodercn === true,
+      enabledModels: Array.isArray(live.enabledModels) ? live.enabledModels : [],
       requestLogging: live.requestLogging === true,
       logDir: live.logDir || path.join(path.dirname(live.catalogPath), "logs"),
       maxRequestLogs: live.maxRequestLogs ?? 0,
       maxGatewayLogBytes: live.maxGatewayLogBytes ?? 0,
-      selectedModels: Array.isArray(live.selectedModels) ? live.selectedModels : [],
     },
     // 本机 provider 配置的存在性探测：只返回布尔值，不读取也不解析凭据内容，
     // 前端据此显隐对应开关（开关已开启时仍显示，便于关回）。
     detected: {
       zcode: zcodeConfigPresent(providerDeps?.zcodeHome ?? path.join(paths.home, ".zcode")),
       codebuddy: codebuddyCredentialsPresent(providerDeps?.codebuddyAuthDir ?? defaultAuthDirectory()),
+      cline: clineCredentialsPresent(providerDeps?.clineApiKeyFile
+        ?? path.join(paths.runtimeHome, "cline-api-key")),
+      qodercn: qodercnCredentialsPresent(providerDeps?.qodercnHome ?? paths.home),
     },
     readonly: {
-      upstreamBaseUrl: sanitizeUrlValue(live.upstreamBaseUrl),
-      upstreamType: live.upstreamType === "newapi" ? "newapi" : "cliproxy",
-      upstreamOnly: live.upstreamOnly === true,
-      // 路由模式按 upstreamOnly 取反导出：false 对应 dynamic（动态路由），避免直接展示布尔值。
-      routerMode: live.upstreamOnly === true ? "upstream-only" : "dynamic",
       host: live.host,
       port: live.port,
       mountPath: live.mountPath,
-      prefix: live.prefix,
-      officialBaseUrl: sanitizeUrlValue(live.officialBaseUrl),
       catalogPath: live.catalogPath,
     },
     configVersion: live.configVersion ?? GATEWAY_CONFIG_VERSION,
   });
-}
-
-/**
- * 上游拉取错误对外展示前的脱敏：配置的 upstreamBaseUrl 与拼出的 /models URL 的 query
- * 都可能携带 token，消息里出现的任何绝对 URL 一律按 sanitizeUrlValue 折叠为 origin+路径。
- */
-function sanitizeUpstreamMessage(config: GatewayConfig, message: string): string {
-  let text = message;
-  if (config.upstreamBaseUrl) {
-    text = text.split(config.upstreamBaseUrl).join(String(sanitizeUrlValue(config.upstreamBaseUrl)));
-  }
-  return text.replace(/https?:\/\/[!-~]+/g, (raw) => {
-    const url = raw.replace(/[.,;:!?)\]}'">]+$/, "");
-    return `${sanitizeUrlValue(url)}${raw.slice(url.length)}`;
-  });
-}
-
-function upstreamFailure(config: GatewayConfig, error: unknown): Response {
-  const message = error instanceof Error ? error.message : String(error);
-  return Response.json({ error: { message: sanitizeUpstreamMessage(config, message) } }, { status: 502 });
 }
 
 function gatewayLogResponse(paths: ResolvedPaths): Response {
@@ -457,6 +453,18 @@ export async function handleWebUiRequest(request: Request, config: GatewayConfig
 
   if (route === "status" && request.method === "GET") return statusResponse(config);
 
+  if (route === "models" && request.method === "GET") {
+    try {
+      const models = ctx.providerModels ? await ctx.providerModels() : await fetchProviderModels(config);
+      return Response.json(models);
+    } catch (error) {
+      return Response.json(
+        { error: { message: error instanceof Error ? error.message : String(error) } },
+        { status: 502 },
+      );
+    }
+  }
+
   if (route === "config" && request.method === "GET") {
     try {
       return configResponse(ctx.paths, ctx.providerDeps);
@@ -490,94 +498,6 @@ export async function handleWebUiRequest(request: Request, config: GatewayConfig
     } catch (error) {
       return badRequest(error instanceof Error ? error.message : String(error));
     }
-  }
-
-  if (route === "upstream/models" && request.method === "GET") {
-    try {
-      const { catalog } = await fetchConfiguredUpstreamCatalog(ctx.paths, config, ctx.upstreamDeps);
-      return Response.json({
-        upstreamType: configuredUpstreamType(config),
-        models: catalog.models.map((model) => ({
-          slug: model.slug,
-          displayName: model.display_name || model.slug,
-        })),
-      });
-    } catch (error) {
-      return upstreamFailure(config, error);
-    }
-  }
-
-  if (route === "upstream/models" && request.method === "POST") {
-    let body: unknown;
-    try {
-      body = await request.json();
-    } catch {
-      return badRequest("Request body must be JSON");
-    }
-    if (typeof body !== "object" || body === null || Array.isArray(body)) {
-      return badRequest("Request body must be a JSON object");
-    }
-    let selected: string[];
-    try {
-      selected = parseSelectedModels((body as { selectedModels?: unknown }).selectedModels);
-    } catch (error) {
-      return badRequest(error instanceof Error ? error.message : String(error));
-    }
-    if (config.upstreamOnly === true && selected.length === 0) {
-      return badRequest("Upstream-only mode requires at least one selected model; the catalog would be empty");
-    }
-    // 目录重建与配置写入必须是同一次保存：先按上游全量目录过滤出已选条目重建
-    // catalogPath，再走 selectedModels 的持久化路径，最后在动态路由模式下重置官方
-    // 目录缓存（Codex 约在 5 分钟内自动刷新 /models，无需重启）；upstream-only 模式
-    // 由 Codex 静态加载目录文件，需要用户确认后重启 Codex app-server。
-    let fetched: Awaited<ReturnType<typeof fetchConfiguredUpstreamCatalog>>;
-    try {
-      fetched = await fetchConfiguredUpstreamCatalog(ctx.paths, config, ctx.upstreamDeps);
-    } catch (error) {
-      return upstreamFailure(config, error);
-    }
-    const { catalog, modelsConfigFile } = fetched;
-    const bySlug = new Map(catalog.models.map((model) => [model.slug, model]));
-    // 与 `models --sync` 的当前选择语义一致：上游已不存在的旧选择直接剔除，
-    // 而不是让整个保存失败；这样 UI 在保存后会自动收敛到最新可选目录。
-    const ordered = catalog.models
-      .map((model) => model.slug)
-      .filter((slug) => selected.includes(slug));
-    if (config.upstreamOnly === true && ordered.length === 0) {
-      return badRequest("Upstream-only mode requires at least one selected model; the catalog would be empty");
-    }
-    try {
-      await rebuildCatalog(ctx.paths, config, ordered.map((slug) => bySlug.get(slug)!), modelsConfigFile);
-      applySelectedModelsPatch(ctx.paths, ordered, ctx.instanceOnly !== true);
-    } catch (error) {
-      return badRequest(error instanceof Error ? error.message : String(error));
-    }
-    if (config.upstreamOnly !== true) {
-      // 重置官方目录缓存让网关下一次 /models 就反映新选择（Codex 约在 5 分钟内自动
-      // 刷新）；写失败不回滚已保存的选择，与网关侧缓存写失败静默忽略同策略。
-      try {
-        invalidateModelsCache(ctx.paths.modelsCacheFile);
-      } catch {}
-    }
-    return Response.json({
-      applied: ["selectedModels"],
-      selected: ordered,
-      count: ordered.length,
-      upstreamOnly: config.upstreamOnly === true,
-    });
-  }
-
-  if (route === "codex/restart" && request.method === "POST") {
-    // 停止当前用户的 Codex app-server；Codex 会自行拉起新进程并重读目录。
-    const stopCodexServers = ctx.upstreamDeps?.stopCodexServers ?? stopCodexAppServers;
-    const result = await stopCodexServers();
-    if (result.scan === "unknown") {
-      return Response.json(
-        { error: { message: `Codex app-server state is unknown: ${result.error}` } },
-        { status: 500 },
-      );
-    }
-    return Response.json({ results: result.results });
   }
 
   if (route === "logs/gateway" && request.method === "GET") return gatewayLogResponse(ctx.paths);

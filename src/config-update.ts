@@ -5,6 +5,8 @@ import { gatewayConfigWarnings, isJsonObject, migrateLegacyConfig } from "./conf
 import { logConfigChange, type ConfigChange } from "./process-log.ts";
 import { validateZcodeConfig } from "./zcode/index.ts";
 import { validateCodebuddyConfig } from "./codebuddy/index.ts";
+import { validateClineConfig } from "./cline/index.ts";
+import { validateQodercnConfig } from "./qodercn/index.ts";
 import type { GatewayConfig, ResolvedPaths } from "./types.ts";
 
 /**
@@ -71,55 +73,15 @@ function writeGatewayConfigFile(file: string, value: GatewayConfig): void {
 export interface WebUiConfigPatch {
   zcode?: unknown;
   codebuddy?: unknown;
+  cline?: unknown;
+  qodercn?: unknown;
+  enabledModels?: unknown;
   requestLogging?: unknown;
   maxRequestLogs?: unknown;
   maxGatewayLogBytes?: unknown;
 }
 
-const SUPPORTED_PATCH_FIELDS = new Set(["zcode", "codebuddy", "requestLogging", "maxRequestLogs", "maxGatewayLogBytes"]);
-
-/** selectedModels 提交校验：字符串数组，去首尾空白，拒绝空项与重复项。 */
-export function parseSelectedModels(value: unknown): string[] {
-  if (!Array.isArray(value) || !value.every((item) => typeof item === "string")) {
-    throw new Error("selectedModels expects an array of model ID strings");
-  }
-  const models = [...new Set(value.map((item) => (item as string).trim()).filter(Boolean))];
-  if (models.length !== value.length) {
-    throw new Error("selectedModels contains empty or duplicate model IDs");
-  }
-  return models;
-}
-
-/**
- * 模型选择的持久化路径（Web UI 专用）：写 config.json 的 selectedModels、按需同步
- * state.json 并落审计。它只改配置字段，不改目录文件——目录重建必须与配置写入
- * 原子地由调用方（webui.ts 的 POST /ui/api/upstream/models）完成，因此通用配置
- * 补丁白名单不含 selectedModels，防止「只改字段、目录不同步」的半更新。
- */
-export function applySelectedModelsPatch(
-  paths: ResolvedPaths,
-  selectedModels: string[],
-  syncState = true,
-): { applied: ConfigChange[] } {
-  if (!fs.existsSync(paths.gatewayConfig)) throw new Error("Gateway is not installed");
-  const config = readGatewayConfigFile(paths.gatewayConfig);
-  const before = Array.isArray(config.selectedModels) ? config.selectedModels : [];
-  if (JSON.stringify(before) === JSON.stringify(selectedModels)) {
-    return { applied: [] };
-  }
-  config.selectedModels = selectedModels;
-  validateZcodeConfig(config);
-  validateCodebuddyConfig(config);
-  writeGatewayConfigFile(paths.gatewayConfig, config);
-  if (syncState && fs.existsSync(paths.stateFile)) {
-    const state = JSON.parse(fs.readFileSync(paths.stateFile, "utf8")) as { config?: unknown };
-    state.config = config;
-    atomicWrite(paths.stateFile, `${JSON.stringify(state, null, 2)}\n`);
-  }
-  const applied: ConfigChange[] = [{ field: "selectedModels", before, after: selectedModels }];
-  logConfigChange(paths.stdoutLog, { command: "webui models", changes: applied }, config.maxGatewayLogBytes ?? 0);
-  return { applied };
-}
+const SUPPORTED_PATCH_FIELDS = new Set(["zcode", "codebuddy", "cline", "qodercn", "enabledModels", "requestLogging", "maxRequestLogs", "maxGatewayLogBytes"]);
 
 /**
  * 校验并应用 Web UI 的配置子集：写 config.json（含 schema 软告警）、按需同步
@@ -156,6 +118,24 @@ export function applyWebUiConfigPatch(
     if (config.codebuddy !== patch.codebuddy) change("codebuddy", patch.codebuddy);
     config.codebuddy = patch.codebuddy;
   }
+  if (patch.cline !== undefined) {
+    if (typeof patch.cline !== "boolean") throw new Error("cline expects a boolean");
+    if (config.cline !== patch.cline) change("cline", patch.cline);
+    config.cline = patch.cline;
+  }
+  if (patch.qodercn !== undefined) {
+    if (typeof patch.qodercn !== "boolean") throw new Error("qodercn expects a boolean");
+    if (config.qodercn !== patch.qodercn) change("qodercn", patch.qodercn);
+    config.qodercn = patch.qodercn;
+  }
+  if (patch.enabledModels !== undefined) {
+    if (!Array.isArray(patch.enabledModels) || !patch.enabledModels.every((item) => typeof item === "string")) {
+      throw new Error("enabledModels expects an array of model ID strings");
+    }
+    const next = [...new Set((patch.enabledModels as string[]).map((item) => item.trim()).filter(Boolean))];
+    if (JSON.stringify(config.enabledModels ?? []) !== JSON.stringify(next)) change("enabledModels", next);
+    config.enabledModels = next;
+  }
   if (patch.requestLogging !== undefined) {
     if (typeof patch.requestLogging !== "boolean") throw new Error("requestLogging expects a boolean");
     if (config.requestLogging !== patch.requestLogging) change("requestLogging", patch.requestLogging);
@@ -189,6 +169,8 @@ export function applyWebUiConfigPatch(
   // 拒绝启动——在这里挡下并保留原配置，避免"保存成功但重启后网关与管理页一起死亡"。
   validateZcodeConfig(config);
   validateCodebuddyConfig(config);
+  validateClineConfig(config);
+  validateQodercnConfig(config);
   writeGatewayConfigFile(paths.gatewayConfig, config);
   if (syncState && fs.existsSync(paths.stateFile)) {
     const state = JSON.parse(fs.readFileSync(paths.stateFile, "utf8")) as { config?: unknown };

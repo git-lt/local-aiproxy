@@ -50,9 +50,6 @@ interface LegacyFieldMigration {
  * 与命令前置的文件级迁移（syncGatewayConfigFile 删除旧键 + 审计）都会自动生效。
  */
 export const LEGACY_FIELD_MIGRATIONS: readonly LegacyFieldMigration[] = [
-  { old: "cliproxyBaseUrl", next: "upstreamBaseUrl", valid: (value) => typeof value === "string" },
-  { old: "cpaOnly", next: "upstreamOnly", valid: (value) => typeof value === "boolean" },
-  { old: "upstream_type", next: "upstreamType", valid: (value) => typeof value === "string" },
   {
     old: "zai",
     next: "zcode",

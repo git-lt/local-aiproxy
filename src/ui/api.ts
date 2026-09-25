@@ -1,7 +1,7 @@
 /**
  * Web UI API 客户端。
  *
- * 令牌流转：`codex-cliproxy web` 打开的地址带 `?token=…`；首次加载时把它转存
+ * 令牌流转：`local-aiproxy web` 打开的地址带 `?token=…`；首次加载时把它转存
  * sessionStorage 并从地址栏清除（history.replaceState），此后所有请求通过
  * `x-ccp-ui-token` 头携带；401 时展示粘贴令牌的输入框。
  */
@@ -13,38 +13,32 @@ export interface UiStatus {
   version: string;
   host: string;
   port: number;
-  prefix: string;
-  upstreamType: "cliproxy" | "newapi";
-  upstreamOnly: boolean;
-  routing: string[];
+  mountPath: string;
 }
 
 export interface UiConfig {
   editable: {
     zcode: boolean;
     codebuddy: boolean;
+    cline: boolean;
+    qodercn: boolean;
+    enabledModels: string[];
     requestLogging: boolean;
     logDir: string;
     maxRequestLogs: number;
     maxGatewayLogBytes: number;
-    selectedModels: string[];
   };
   /** 本机 provider 配置的存在性探测结果：决定对应开关是否显示。 */
   detected: {
     zcode: boolean;
     codebuddy: boolean;
+    cline: boolean;
+    qodercn: boolean;
   };
   readonly: {
-    upstreamBaseUrl: string;
-    upstreamType: string;
-    upstreamOnly: boolean;
-    /** 路由模式：由 upstreamOnly 取反导出（false -> dynamic），直接展示模式名而非布尔值。 */
-    routerMode: "dynamic" | "upstream-only";
     host: string;
     port: number;
     mountPath: string;
-    prefix: string;
-    officialBaseUrl: string;
     catalogPath: string;
   };
   configVersion: string;
@@ -54,6 +48,9 @@ export interface UiConfig {
 export interface UiConfigChanges {
   zcode?: boolean;
   codebuddy?: boolean;
+  cline?: boolean;
+  qodercn?: boolean;
+  enabledModels?: string[];
   requestLogging?: boolean;
   maxRequestLogs?: string;
   maxGatewayLogBytes?: 0 | string;
@@ -130,32 +127,18 @@ export const getUiConfig = (): Promise<UiConfig> => api<UiConfig>("/ui/api/confi
 export const postUiConfig = (changes: UiConfigChanges): Promise<{ restarting: boolean }> =>
   api<{ restarting: boolean }>("/ui/api/config", { method: "POST", json: changes });
 
-/** 上游模型条目：slug 是模型 ID，displayName 供列表展示。 */
-export interface UpstreamModel {
-  slug: string;
-  displayName: string;
+/** 各 provider 当前对外可见的模型清单。 */
+export interface UiProviderModels {
+  zcode: string[];
+  codebuddy: string[];
+  cline: string[];
+  qodercn: string[];
 }
 
-/** 拉取模型：从上游 /models 取完整目录，供勾选（不改变当前选择）。 */
-export const fetchUpstreamModels = (): Promise<{ upstreamType: string; models: UpstreamModel[] }> =>
-  api<{ upstreamType: string; models: UpstreamModel[] }>("/ui/api/upstream/models");
+/** 拉取三个 provider 的模型清单（服务端现场构建 adapter，用完即回收）。 */
+export const getProviderModels = (): Promise<UiProviderModels> =>
+  api<UiProviderModels>("/ui/api/models");
 
-/** 保存模型选择：服务端重建目录文件并写入 selectedModels。 */
-export const applyUpstreamModels = (selectedModels: string[]): Promise<{
-  applied: string[];
-  selected: string[];
-  count: number;
-  upstreamOnly: boolean;
-}> => api("/ui/api/upstream/models", { method: "POST", json: { selectedModels } });
-
-export interface CodexStopResult {
-  pid: number;
-  status: "stopped" | "surviving" | "failed";
-}
-
-/** 停止当前用户的 Codex app-server；Codex 重新拉起后加载新目录。 */
-export const restartCodexAppServers = (): Promise<{ results: CodexStopResult[] }> =>
-  api<{ results: CodexStopResult[] }>("/ui/api/codex/restart", { method: "POST" });
 export const getGatewayLogTail = (): Promise<{ text: string; truncated: boolean }> =>
   api<{ text: string; truncated: boolean }>("/ui/api/logs/gateway");
 export const listRequestLogs = (offset: number, limit: number): Promise<RequestLogPage> =>
