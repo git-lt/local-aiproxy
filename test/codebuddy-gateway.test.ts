@@ -5,6 +5,9 @@ import path from "node:path";
 import test from "node:test";
 import { createGatewayHandler, isCodebuddyResponsesWebSocket } from "../src/gateway.ts";
 import { codebuddyEnabled, createCodebuddyAdapter, validateCodebuddyConfig } from "../src/codebuddy/index.ts";
+import { CODEBUDDY_AGENT_IDENTITY } from "../src/codebuddy/request.ts";
+import { CODEBUDDY_CLI_VERSION } from "../src/codebuddy/request-context.ts";
+import fingerprint from "../src/codebuddy/fingerprint-data.json";
 import { CodebuddyCredentialError } from "../src/codebuddy/credentials.ts";
 import type { CodebuddyCredential } from "../src/codebuddy/credentials.ts";
 import type { GatewayConfig } from "../src/types.ts";
@@ -167,6 +170,8 @@ async function fixture(run: (context: FixtureContext) => Promise<void>): Promise
     fs.rmSync(directory, { recursive: true, force: true });
   }
 }
+
+const OFFICIAL_AGENT_SYSTEM_PROMPT: string = fingerprint.agentSystemPrompt;
 
 test("codebuddy-intl/ 前缀在 /v1/responses 被拦截并转发官方 chat/completions", async () => {
   await fixture(async ({ create, primeCatalog }) => {
@@ -437,6 +442,63 @@ test("客户端在上游建连阶段取消时不触发重试", async () => {
     const response = await handler(inflight);
     assert.equal(response.status, 499, "客户端取消是确定性终止，不属于瞬时故障");
     assert.equal(chats.length, 1);
+  });
+});
+
+test("转发时整段替换客户端系统提示词为官方 CLI 提示词（渠道指纹校验）", async () => {
+  await fixture(async ({ create, primeCatalog, chats }) => {
+    const handler = create({});
+    await primeCatalog(handler);
+    const zcodeSystem = "You are ZCode, an interactive coding agent\n\n# ZCode Harness\n- 客户端专属规则";
+    const response = await handler(new Request("http://127.0.0.1:8320/v1/responses", {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${INBOUND_OAUTH}` },
+      body: JSON.stringify({
+        model: "codebuddy-intl/gpt-5.6-luna",
+        input: [
+          { role: "system", content: zcodeSystem },
+          { role: "user", content: [{ type: "input_text", text: "你好" }] },
+        ],
+        stream: false,
+      }),
+    }));
+    assert.equal(response.status, 200);
+    await decoded(response);
+    const system = chats[0]!.body.messages[0];
+    assert.equal(system.role, "system");
+    // 上游按客户端系统提示词做渠道指纹校验：客户端提示词整段不得出现。
+    assert.ok(!(system.content as string).includes("ZCode"), "客户端系统提示词必须被整段替换");
+    assert.ok(!(system.content as string).includes("ZCode Harness"));
+    assert.match(system.content as string, /^You are CodeBuddy Code\./);
+    assert.equal(system.content, OFFICIAL_AGENT_SYSTEM_PROMPT);
+    // 客户端自己的上下文在 user 消息里，不受替换影响。
+    assert.equal(chats[0]!.body.messages[1].role, "user");
+    assert.match(JSON.stringify(chats[0]!.body.messages[1].content), /你好/);
+  });
+});
+
+test("官方提示词数据完整：无模板变量残留，且版本与身份头同源", async () => {
+  assert.ok(!OFFICIAL_AGENT_SYSTEM_PROMPT.includes("{{"), "剥离后不得残留 {{");
+  assert.ok(!OFFICIAL_AGENT_SYSTEM_PROMPT.includes("{%"), "剥离后不得残留 {%");
+  assert.ok(OFFICIAL_AGENT_SYSTEM_PROMPT.startsWith(CODEBUDDY_AGENT_IDENTITY), "首行必须与身份行一致");
+  assert.ok(OFFICIAL_AGENT_SYSTEM_PROMPT.length > 5_000, "提示词长度异常，可能剥离过度");
+  assert.ok(!OFFICIAL_AGENT_SYSTEM_PROMPT.includes("Is WSL"), "默认上下文下 WSL 段应整块删除");
+  assert.ok(!OFFICIAL_AGENT_SYSTEM_PROMPT.includes("Working directory:"), "裸变量行应删除");
+  // 版本必须与身份头同源：UA/IDE 头用的是同一个取值来源。
+  assert.equal(CODEBUDDY_CLI_VERSION, fingerprint.cliVersion);
+});
+
+test("CodeBuddy 目录条目下发官方 base_instructions（Codex 依此发送系统提示词）", async () => {
+  await fixture(async ({ create, primeCatalog }) => {
+    const handler = create({});
+    await primeCatalog(handler);
+    // Codex 带 client_version 时才拿到含 base_instructions 的 Codex 目录形状。
+    const models = await (await handler(new Request("http://127.0.0.1:8320/v1/models?client_version=0.5.0"))).json() as Json;
+    const entry = models.models.find((model: Json) => model.slug === "codebuddy-intl/gpt-5.6-luna");
+    assert.ok(entry, "目录必须含 codebuddy 条目");
+    assert.ok(entry.base_instructions, "base_instructions 不得为空串，否则 Codex 回退内置提示词");
+    assert.match(entry.base_instructions, /^You are CodeBuddy Code\./);
+    assert.equal(entry.base_instructions, OFFICIAL_AGENT_SYSTEM_PROMPT);
   });
 });
 

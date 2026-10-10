@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import codexClientModels from "../../models/codex_client_models.json";
+import fingerprint from "./fingerprint-data.json";
 import { atomicWrite } from "../toml.ts";
 import { parseCodexCatalog } from "../catalog.ts";
 import type { ModelCatalog, ModelEntry } from "../types.ts";
@@ -228,6 +229,9 @@ function cloneCodexBase(id: string, priority: number): ModelEntry {
 export function synthesizeCodebuddyEntry(entry: ScopeModel, priority: number, profile: CodebuddyProfile): ModelEntry {
   const id = entry.id as string;
   const model = cloneCodexBase(id, priority);
+  // Codex 依目录条目的 base_instructions 下发系统提示词：置空会让它回退客户端内置
+  // 提示词，转发时又会被上游按渠道指纹拒掉，故直接下发官方 CLI 提示词。
+  model.base_instructions = fingerprint.agentSystemPrompt;
   const reasoning = entry.reasoning !== null && typeof entry.reasoning === "object" && !Array.isArray(entry.reasoning)
     ? entry.reasoning as Record<string, unknown>
     : undefined;

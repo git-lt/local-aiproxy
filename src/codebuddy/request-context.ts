@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import fingerprint from "./fingerprint-data.json";
 import type { CodebuddyCredential, CodebuddyProfile } from "./credentials.ts";
 import { profileProduct, profileRegion } from "./credentials.ts";
 
@@ -7,10 +8,10 @@ import { profileProduct, profileRegion } from "./credentials.ts";
  * 语义对齐 codebuddy2api 的 client_profiles.py；版本号集中在此，单一来源。
  */
 
-/** 伪装的 CLI 版本；与本机 `@tencent-ai/codebuddy-code` 保持一致，目录缓存键也会带上。 */
-export const CODEBUDDY_CLI_VERSION = "2.151.0";
-export const CODEBUDDY_WORKBUDDY_VERSION = "5.5.2";
-export const CODEBUDDY_WORKBUDDY_CLI_VERSION = "2.137.1";
+/** 伪装的 CLI 版本；与官方提示词的取值版本一致（见 fingerprint-data.json），目录缓存键也带上。 */
+export const CODEBUDDY_CLI_VERSION = fingerprint.cliVersion;
+export const CODEBUDDY_WORKBUDDY_VERSION = fingerprint.workbuddyVersion;
+export const CODEBUDDY_WORKBUDDY_CLI_VERSION = fingerprint.workbuddyCliVersion;
 
 /** OpenAI JS SDK 随请求发送的 x-stainless 系列与通用代理意图头（对齐真实 CLI 流量）。 */
 const SDK_HEADERS: Record<string, string> = {

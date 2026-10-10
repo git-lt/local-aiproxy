@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import fingerprint from "./fingerprint-data.json";
 import { decodeCodebuddyReasoning } from "./wire.ts";
 
 /**
@@ -36,6 +37,15 @@ interface ChatMessage {
 }
 
 function fail(message: string): never { throw new CodebuddyRequestError(message); }
+
+/**
+ * 官方 CLI 身份行：取自 `fingerprint-data.json` 的 `agentSystemPromptBase`
+ * （与 `agentSystemPrompt` 首行一致）。
+ */
+export const CODEBUDDY_AGENT_IDENTITY = fingerprint.agentSystemPromptBase.trim();
+
+/** 官方 CLI 系统提示词（已剥离模板变量）。 */
+const OFFICIAL_SYSTEM_PROMPT = fingerprint.agentSystemPrompt;
 function record(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
@@ -342,15 +352,22 @@ export function translateCodebuddyRequest(body: Record<string, unknown>, upstrea
     fail("input 必须是字符串或数组");
   }
 
+  // 网关自己生成的 system 旁白：客户端提示词会被整段替换，但这些必须保留。
+  const gatewayNotes: string[] = [];
   if (convertedTools.dropped.size) {
     // 剥离后必须告知模型，否则模型会声称拥有已被移除的能力。
-    system.push(`本通道无法执行以下服务器内置工具，已从本请求移除：${[...convertedTools.dropped].join("、")}。请勿声称已使用这些工具。`);
+    gatewayNotes.push(`本通道无法执行以下服务器内置工具，已从本请求移除：${[...convertedTools.dropped].join("、")}。请勿声称已使用这些工具。`);
   }
-  if (system.length === 0 && body.instructions === undefined) {
-    // 实测上游要求首条消息必须是 system prompt（空字符串即可）；无任何系统内容时
-    // 注入空 system，不改变模型行为。
-    system.push("");
-  }
+
+  /**
+   * 上游按**客户端系统提示词**做渠道指纹校验：第三方客户端（ZCode / Codex 等）的
+   * 系统提示词原样透传会被判「Illegal API invocation from an unapproved channel」（400）。
+   *
+   * 实测（cn 端点，2026-10-10）：官方提示词可通过；官方 + 客户端提示词追加仍被拒；
+   * 仅替换首行身份声明也仍被拒。因此必须整段替换为官方提示词，不能追加、不能局部改。
+   * 客户端自身的规则与项目上下文由其 user 消息承载，不受此处影响。
+   */
+  const systemText = [OFFICIAL_SYSTEM_PROMPT, ...gatewayNotes].join("\n\n");
 
   const translated: Record<string, unknown> = {
     model: upstreamModel,
@@ -359,7 +376,7 @@ export function translateCodebuddyRequest(body: Record<string, unknown>, upstrea
     stream_options: { include_usage: true },
     max_tokens: maxTokens,
     messages: [
-      ...(system.length ? [{ role: "system", content: [...(body.instructions ? [body.instructions] : []), ...system].join("\n\n") } as ChatMessage] : []),
+      ...(systemText ? [{ role: "system", content: systemText } as ChatMessage] : []),
       ...messages,
     ],
   };

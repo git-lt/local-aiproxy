@@ -2,8 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { CodebuddyRequestError, translateCodebuddyRequest } from "../src/codebuddy/request.ts";
 import { encodeCodebuddyReasoning } from "../src/codebuddy/wire.ts";
+import fingerprint from "../src/codebuddy/fingerprint-data.json";
 
 type Json = Record<string, unknown>;
+
+/** 转发时实际下发的系统提示词恒为官方 CLI 提示词（客户端提示词整段替换）。 */
+const OFFICIAL_AGENT_SYSTEM_PROMPT: string = fingerprint.agentSystemPrompt;
 
 test("基础翻译：instructions/system 合并、max_tokens 与参数透传", () => {
   const { body, tools, dropped } = translateCodebuddyRequest({
@@ -21,7 +25,10 @@ test("基础翻译：instructions/system 合并、max_tokens 与参数透传", (
   const messages = body.messages as Json[];
   assert.equal(messages.length, 2);
   assert.equal(messages[0]!.role, "system");
-  assert.equal(messages[0]!.content, "SYS-INSTR\n\nHIST-SYS");
+  // 客户端的 instructions / system 全部被官方 CLI 提示词整段替换（渠道指纹校验）。
+  assert.equal(messages[0]!.content, OFFICIAL_AGENT_SYSTEM_PROMPT);
+  assert.ok(!(messages[0]!.content as string).includes("SYS-INSTR"));
+  assert.ok(!(messages[0]!.content as string).includes("HIST-SYS"));
   // 数组内容块保持 OpenAI 多模态 parts 形状。
   assert.deepEqual(messages[1], { role: "user", content: [{ type: "text", text: "你好" }] });
   assert.equal(body.model, "gpt-5.6-luna");
@@ -60,9 +67,10 @@ test("工具声明：function/custom/namespace 与 web_search 降级旁白", () 
   assert.equal(tools.get("apply_patch")?.custom, true);
   assert.equal(tools.get(String(nested.name))?.namespace, "fs");
   assert.deepEqual(dropped, ["web_search"]);
-  // 剥离旁白注入 system。
+  // 剥离旁白注入 system：客户端提示词被整段替换，网关自生成的旁白仍须保留。
   const messages = body.messages as Json[];
   assert.match(String(messages[0]!.content), /web_search/);
+  assert.ok(String(messages[0]!.content).startsWith(OFFICIAL_AGENT_SYSTEM_PROMPT));
 });
 
 test("history：函数调用/输出配对、custom 调用、reasoning 与服务器调用降级", () => {
@@ -84,10 +92,10 @@ test("history：函数调用/输出配对、custom 调用、reasoning 与服务�
     ],
   }, "gpt-5.6-luna");
   const messages = body.messages as Json[];
-  // 无系统内容时注入空 system（上游要求首条为 system prompt）+ user → assistant(tool_calls)
+  // 无客户端 system 时仍注入官方提示词（上游要求首条为 system prompt）+ user → assistant(tool_calls)
   // → tool → assistant(tool_calls) → tool → assistant(搜索旁白) → assistant(回答)
   assert.equal(messages.length, 8);
-  assert.deepEqual(messages[0], { role: "system", content: "" });
+  assert.deepEqual(messages[0], { role: "system", content: OFFICIAL_AGENT_SYSTEM_PROMPT });
   const call = messages[2]!;
   assert.equal(call.role, "assistant");
   const toolCall = (call.tool_calls as Json[])[0]!;
@@ -235,13 +243,13 @@ test("不支持的字段显式报 400", () => {
   // 未知 *_call 类型按服务器调用降级为文本摘要，不静默丢弃。
   const degraded = translateCodebuddyRequest({ model: "m", input: [{ type: "file_search_call" }] }, "m");
   const degradedMessages = degraded.body.messages as Json[];
-  assert.deepEqual(degradedMessages[0], { role: "system", content: "" }, "无系统内容时注入空 system");
+  assert.deepEqual(degradedMessages[0], { role: "system", content: OFFICIAL_AGENT_SYSTEM_PROMPT }, "无客户端 system 时下发官方提示词");
   assert.match(String(degradedMessages[1]!.content), /file_search_call/);
   assert.throws(() => translateCodebuddyRequest({ model: "m", input: 42 }, "m"), /input 必须是/);
 });
 
-test("developer 消息的文本数组内容拼接进 system，不误报图片", () => {
-  // Codex Desktop 把 developer 上下文发成多个 input_text 块的数组，仍是纯文本。
+test("developer 消息的文本数组内容不误报图片（内容整段替换为官方提示词）", () => {
+  // Codex Desktop 把 developer 上下文发成多个 input_text 块的数组，仍是纯文本、不该被拒。
   const { body } = translateCodebuddyRequest({
     model: "codebuddy/gpt-5.6-luna",
     input: [
@@ -254,7 +262,7 @@ test("developer 消息的文本数组内容拼接进 system，不误报图片", 
   }, "gpt-5.6-luna");
   const messages = body.messages as Json[];
   assert.equal(messages[0]!.role, "system");
-  assert.equal(messages[0]!.content, "<app-context>\n\n<skills>");
+  assert.equal(messages[0]!.content, OFFICIAL_AGENT_SYSTEM_PROMPT);
   assert.equal(messages[1]!.role, "user");
 });
 
