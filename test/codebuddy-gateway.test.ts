@@ -87,6 +87,8 @@ interface FixtureOptions {
   missingRegion?: "cn" | "intl";
   chatResponse?: () => Response;
   catalogResponse?: () => Response;
+  /** 上游重试退避；测试传 [] 关闭重试、[0,0] 保留次数但去掉等待。 */
+  retryDelaysMs?: number[];
 }
 
 interface FixtureContext {
@@ -140,6 +142,7 @@ async function fixture(run: (context: FixtureContext) => Promise<void>): Promise
               close: () => {},
             },
             cacheDirectory: directory,
+            upstreamRetryDelaysMs: options.retryDelaysMs,
             fetch: async (url, init) => {
               if (url.endsWith("/v3/config")) {
                 catalogFetches.push(new Headers(init.headers));
@@ -356,6 +359,84 @@ test("上游错误正文回显 token 时被彻底遮蔽（含转义形式）", a
     assert.ok(!body.includes(JSON.stringify(ACCESS_TOKEN).slice(1, -1)), "JSON 转义形式不得回显");
     assert.ok(!body.includes(REFRESH_TOKEN), "refreshToken 不得回显");
     assert.match(body, /重新登录/);
+  });
+});
+
+test("上游 5xx 按退避重试后成功，重试沿用同一套身份头与会话", async () => {
+  await fixture(async ({ create, primeCatalog, chats }) => {
+    let attempt = 0;
+    const handler = create({
+      retryDelaysMs: [0, 0],
+      chatResponse: () => {
+        attempt++;
+        return attempt === 1 ? new Response("upstream busy", { status: 503 }) : chatUpstream("重试后成功");
+      },
+    });
+    await primeCatalog(handler);
+    const response = await handler(request("codebuddy-intl/gpt-5.6-luna", { stream: false }));
+    assert.equal(response.status, 200, "503 属瞬时故障，重试后应成功");
+    assert.equal((await decoded(response)).output[0].content[0].text, "重试后成功");
+    assert.equal(chats.length, 2, "首次 503 后应重试一次");
+    // 重试不能换身份或换会话，否则上游会把一次逻辑请求拆成两条独立会话。
+    assert.equal(chats[0]!.headers.get("x-conversation-id"), chats[1]!.headers.get("x-conversation-id"));
+    assert.equal(chats[0]!.headers.get("authorization"), chats[1]!.headers.get("authorization"));
+    assert.deepEqual(chats[0]!.body, chats[1]!.body, "重试的请求体必须一致");
+  });
+});
+
+test("上游连接异常重试耗尽后回 502，并在消息里带上底层原因", async () => {
+  await fixture(async ({ create, primeCatalog, chats }) => {
+    const handler = create({
+      retryDelaysMs: [0, 0],
+      chatResponse: () => { throw Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET" }); },
+    });
+    await primeCatalog(handler);
+    const response = await handler(request("codebuddy-intl/gpt-5.6-luna", { stream: false }));
+    assert.equal(response.status, 502);
+    const payload = await response.json() as Json;
+    assert.equal(payload.error.type, "upstream_error");
+    assert.match(payload.error.message, /已重试 2 次/);
+    assert.match(payload.error.message, /ECONNRESET/, "502 必须暴露底层原因，否则重试耗尽也无法诊断");
+    assert.equal(chats.length, 3, "缺省重试 2 次 = 共 3 次尝试");
+  });
+});
+
+test("确定性 4xx 不重试：重放只会把同一个错误再付一遍代价", async () => {
+  await fixture(async ({ create, primeCatalog, chats }) => {
+    const handler = create({
+      retryDelaysMs: [0, 0],
+      chatResponse: () => new Response(JSON.stringify({ error: { message: "Illegal API invocation from an unapproved channel" } }), {
+        status: 400, headers: { "content-type": "application/json" },
+      }),
+    });
+    await primeCatalog(handler);
+    const response = await handler(request("codebuddy-intl/gpt-5.6-luna", { stream: false }));
+    assert.equal(response.status, 400, "上游状态码原样透传");
+    assert.match((await response.json() as Json).error.message, /unapproved channel/);
+    assert.equal(chats.length, 1, "400 不在可重试集合内");
+  });
+});
+
+test("客户端在上游建连阶段取消时不触发重试", async () => {
+  await fixture(async ({ create, primeCatalog, chats }) => {
+    const controller = new AbortController();
+    const handler = create({
+      retryDelaysMs: [0, 0],
+      chatResponse: () => {
+        controller.abort();
+        throw new Error("socket hang up");
+      },
+    });
+    await primeCatalog(handler);
+    const inflight = new Request("http://127.0.0.1:8320/v1/responses", {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${INBOUND_OAUTH}` },
+      body: JSON.stringify({ model: "codebuddy-intl/gpt-5.6-luna", input: "你好", stream: false }),
+      signal: controller.signal,
+    });
+    const response = await handler(inflight);
+    assert.equal(response.status, 499, "客户端取消是确定性终止，不属于瞬时故障");
+    assert.equal(chats.length, 1);
   });
 });
 

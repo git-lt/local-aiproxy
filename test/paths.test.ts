@@ -35,20 +35,28 @@ test("runtimeHome override scopes instance state and the LaunchAgent to the conf
 test("旧运行时目录迁移到新目录，旧目录改名保留；已迁移或新目录已存在时不覆盖", () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "ccp-migrate-"));
   try {
-    const paths = resolvePaths({ HOME: home });
-    const legacy = path.join(home, ".codex-cliproxy-gateway");
-    fs.mkdirSync(legacy, { recursive: true });
-    fs.writeFileSync(path.join(legacy, "config.json"), "{}");
-    fs.mkdirSync(path.join(legacy, "logs"), { recursive: true });
+  const paths = resolvePaths({ HOME: home });
+  const legacy = path.join(home, ".codex-cliproxy-gateway");
+  fs.mkdirSync(legacy, { recursive: true });
+  fs.writeFileSync(path.join(legacy, "config.json"), "{}");
+  fs.mkdirSync(path.join(legacy, "logs"), { recursive: true });
+  // 写一份指向旧目录的配置：迁移时 catalogPath/logDir 必须跟着改到新家。
+  const legacyConfig = {
+    catalogPath: path.join(legacy, "catalog.json"),
+    logDir: path.join(legacy, "logs"),
+  };
+  fs.writeFileSync(path.join(legacy, "config.json"), `${JSON.stringify(legacyConfig, null, 2)}\n`);
 
     const migration = migrateRuntimeHome(paths);
     assert.ok(migration, "首次迁移应返回迁移结果");
     assert.equal(migration!.from, legacy);
     assert.equal(migration!.to, paths.runtimeHome);
-    assert.equal(JSON.parse(fs.readFileSync(paths.gatewayConfig, "utf8")).toString(), "[object Object]");
     assert.ok(fs.existsSync(path.join(paths.runtimeHome, "logs")), "子目录也要搬过去");
     assert.ok(!fs.existsSync(legacy), "旧目录不再占用原名");
     assert.ok(fs.existsSync(migration!.backup), "旧目录必须以备份形式保留");
+    const migratedConfig = JSON.parse(fs.readFileSync(paths.gatewayConfig, "utf8")) as Record<string, string>;
+    assert.equal(migratedConfig.catalogPath, paths.catalogFile, "catalogPath 必须跟随新目录");
+    assert.equal(migratedConfig.logDir, paths.logDir, "logDir 必须跟随新目录");
 
     // 已迁移过：新目录存在时绝不覆盖，也不重复备份。
     assert.equal(migrateRuntimeHome(paths), undefined);

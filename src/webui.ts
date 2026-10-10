@@ -56,16 +56,22 @@ export interface UiProviderModels {
 }
 
 /**
- * 现场构建三个 adapter 拉取目录（用完即回收，不常驻）。本命令只看清单，
+ * 现场构建四个 adapter 拉取目录（用完即回收，不常驻）。本命令只看清单，
  * 不要求对应开关已打开——先看清单再决定开哪个才是常见顺序。
+ * `refresh` 为 true 时绕过各 provider 的目录 TTL 缓存，强制重拉远端列表
+ * （Web UI 的「刷新」按钮语义）。
  * 单组失败不影响其余组：catch 后按空清单返回。
  */
-export async function fetchProviderModels(config: GatewayConfig): Promise<UiProviderModels> {
+export async function fetchProviderModels(
+  config: GatewayConfig,
+  options: { refresh?: boolean } = {},
+): Promise<UiProviderModels> {
+  const refresh = options.refresh === true;
   const probe: GatewayConfig = { ...config, zcode: true, codebuddy: true, cline: true, qodercn: true };
   const handleZcode = createZcodeAdapter(probe, {});
-  const handleCodebuddy = createCodebuddyAdapter(probe, { refreshCatalogOnStart: false });
-  const handleCline = createClineAdapter(probe, {});
-  const handleQodercn = createQodercnAdapter(probe, {});
+  const handleCodebuddy = createCodebuddyAdapter(probe, { refreshCatalogOnStart: refresh });
+  const handleCline = createClineAdapter(probe, refresh ? { catalogTtlMs: 0 } : {});
+  const handleQodercn = createQodercnAdapter(probe, refresh ? { catalogTtlMs: 0 } : {});
   try {
     const [zcode, codebuddy, cline, qodercn] = await Promise.all([
       handleZcode.catalog().catch(() => ({ models: [] })),
@@ -455,7 +461,11 @@ export async function handleWebUiRequest(request: Request, config: GatewayConfig
 
   if (route === "models" && request.method === "GET") {
     try {
-      const models = ctx.providerModels ? await ctx.providerModels() : await fetchProviderModels(config);
+      // ?refresh=1：绕过目录 TTL 缓存，强制重拉各 provider 的远端列表。
+      const refresh = new URL(request.url).searchParams.get("refresh") === "1";
+      const models = ctx.providerModels
+        ? await ctx.providerModels()
+        : await fetchProviderModels(config, { refresh });
       return Response.json(models);
     } catch (error) {
       return Response.json(
@@ -498,6 +508,18 @@ export async function handleWebUiRequest(request: Request, config: GatewayConfig
     } catch (error) {
       return badRequest(error instanceof Error ? error.message : String(error));
     }
+  }
+
+  // 独立重启：不写配置，只让运行中的网关重新加载已落盘的 config.json
+  // （例如刚在界面里改了模型白名单却不想再动别的字段）。临时实例不参与服务管理。
+  if (route === "restart" && request.method === "POST") {
+    const managesService = ctx.instanceOnly !== true;
+    const restarting = managesService && fs.existsSync(ctx.paths.launchAgent);
+    if (restarting) {
+      markPendingRestart(ctx.paths.stateFile);
+      (ctx.scheduleRestart ?? defaultScheduleRestart)(ctx.paths);
+    }
+    return Response.json({ restarting });
   }
 
   if (route === "logs/gateway" && request.method === "GET") return gatewayLogResponse(ctx.paths);

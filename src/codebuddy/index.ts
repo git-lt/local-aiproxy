@@ -39,6 +39,8 @@ export interface CodebuddyDependencies {
   fetch?: (url: string, init: RequestInit) => Promise<Response>;
   /** 目录刷新间隔（毫秒）；测试可调小，生产缺省 16 分钟。 */
   catalogRefreshIntervalMs?: number;
+  /** 上游瞬时故障的重试退避（毫秒）；数组长度即最大重试次数，测试可传 [] 关闭重试。 */
+  upstreamRetryDelaysMs?: number[];
   /** 是否在适配器构造后立即强制刷新一次目录；测试可关闭，生产缺省开启。 */
   refreshCatalogOnStart?: boolean;
   /** 定时器注入点，便于测试不依赖真实时间。 */
@@ -50,6 +52,61 @@ export interface CodebuddyDependencies {
 
 /** CodeBuddy CLI 自身约每 16 分钟刷新一次目录，网关按同一节奏主动更新。 */
 const DEFAULT_CATALOG_REFRESH_INTERVAL_MS = 16 * 60 * 1000;
+
+/**
+ * 上游瞬时故障的退避序列（毫秒）。长度即最大重试次数：缺省重试 2 次、共 3 次尝试。
+ * 实测 CodeBuddy 国内端点偶发「建连被重置」与一次性 5xx，重试后即恢复。
+ */
+const DEFAULT_UPSTREAM_RETRY_DELAYS_MS = [300, 900];
+
+/**
+ * 可重试的上游状态码：只含瞬时故障（限流、网关/超时类）。
+ * 400/401/403/404 等确定性失败一律不重试——重放只会把同一个错误再付一遍代价。
+ */
+const RETRYABLE_UPSTREAM_STATUS = new Set([408, 425, 429, 500, 502, 503, 504]);
+
+/** 可被 abort 打断的等待：重试退避必须让客户端取消立刻生效，而不是白等一个退避周期。 */
+function waitForRetry(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) { reject(signal.reason); return; }
+    const onAbort = () => { clearTimeout(timer); reject(signal.reason); };
+    const timer = setTimeout(() => { signal.removeEventListener("abort", onAbort); resolve(); }, ms);
+    signal.addEventListener("abort", onAbort, { once: true });
+    // 检查与注册之间仍可能发生取消，补一次判断避免漏接。
+    if (signal.aborted) onAbort();
+  });
+}
+
+/**
+ * 带退避重试的上游请求。
+ *
+ * 重试只覆盖「尚未向客户端写出任何字节」的阶段：建连异常与可重试状态码。
+ * 上游返回 200 之后即进入流式转发，中途失败无法重放（响应头已发出），那种情况
+ * 只能按502 收尾——这也是本函数不接管响应体读取的原因。
+ */
+async function fetchUpstreamWithRetry(
+  send: () => Promise<Response>,
+  delays: number[],
+  signal: AbortSignal,
+  isClientAbort: () => boolean,
+): Promise<Response> {
+  for (let attempt = 0; ; attempt++) {
+    signal.throwIfAborted();
+    let response: Response;
+    try {
+      response = await send();
+    } catch (error) {
+      // 客户端取消不是瞬时故障：立即上抛，交由499 分支处理。
+      if (isClientAbort() || attempt >= delays.length) throw error;
+      await waitForRetry(delays[attempt], signal);
+      continue;
+    }
+    if (!RETRYABLE_UPSTREAM_STATUS.has(response.status) || attempt >= delays.length) return response;
+    // 重试前必须丢弃失败响应体，否则连接池会被占满，反而拖垮后续请求。
+    await response.body?.cancel().catch(() => {});
+    await waitForRetry(delays[attempt], signal);
+  }
+}
 
 /**
  * CodeBuddy 入口的生效判定。upstream-only 纯转发模式下按禁用处理：不建凭据/目录
@@ -88,6 +145,8 @@ export function createCodebuddyAdapter(config: GatewayConfig, dependencies: Code
     )
     : undefined;
   const fetchUpstream = dependencies.fetch ?? ((url: string, init: RequestInit) => fetch(url, init));
+  const upstreamRetryDelays = (dependencies.upstreamRetryDelaysMs ?? DEFAULT_UPSTREAM_RETRY_DELAYS_MS)
+    .map((ms) => Math.max(0, Math.trunc(ms)));
   const catalogStore = enabled
     ? createCodebuddyCatalogStore({
       cacheDirectory: dependencies.cacheDirectory ?? path.dirname(config.catalogPath),
@@ -251,16 +310,24 @@ export function createCodebuddyAdapter(config: GatewayConfig, dependencies: Code
           return fail(404, "此模型不在 CodeBuddy/WorkBuddy 当前账号的可服务目录内");
         }
         const translated = translateCodebuddyRequest(input, model);
-        upstreamUrl = `${credential.endpoint}/v2/chat/completions`;
+        const target = `${credential.endpoint}/v2/chat/completions`;
+        upstreamUrl = target;
         // 从当前凭据重建身份头与会话归因，不采信入站客户端的身份或授权头。
         const context = contexts.resolve(request, credential);
         const headers = buildCodebuddyChatHeaders(credential, context);
         upstreamRequestHeaders = headers;
         const body = translated.body;
         upstreamRequestBody = sink ? redactValue(body) : undefined;
-        const upstream = await fetchUpstream(upstreamUrl, {
-          method: "POST", headers, body: JSON.stringify(body), redirect: "manual", signal: abort.signal,
-        });
+        // 重试沿用同一套身份头与会话 id：换 id 会把一次逻辑请求拆成多条上游会话。
+        const payloadJson = JSON.stringify(body);
+        const upstream = await fetchUpstreamWithRetry(
+          () => fetchUpstream(target, {
+            method: "POST", headers, body: payloadJson, redirect: "manual", signal: abort.signal,
+          }),
+          upstreamRetryDelays,
+          abort.signal,
+          () => request.signal.aborted,
+        );
         if (!upstream.ok) {
           const text = redact(await upstream.text());
           cleanup();
@@ -314,7 +381,9 @@ export function createCodebuddyAdapter(config: GatewayConfig, dependencies: Code
         if (error instanceof CodebuddyRequestError) return fail(400, error.message);
         if (error instanceof CodebuddyCredentialError) return fail(503, error.message, "configuration_error");
         if (request.signal.aborted) return fail(499, "CodeBuddy 请求已取消", "request_cancelled");
-        return fail(502, "CodeBuddy 上游请求失败", "upstream_error");
+        // 带上底层原因：这个 502 原本是黑盒，排查时无法区分断连、超时还是上游异常。
+        const cause = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+        return fail(502, `CodeBuddy 上游请求失败（已重试 ${upstreamRetryDelays.length} 次）：${cause}`, "upstream_error");
       }
     },
     close(): void {

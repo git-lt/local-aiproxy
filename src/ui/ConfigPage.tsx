@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ApiError,
   getProviderModels,
@@ -26,7 +26,20 @@ interface FormState {
   maxGatewayLogUnit: LogSizeUnit;
 }
 
-type SavePhase = "idle" | "confirm" | "saving" | "restarting" | "failed";
+type SavePhase = "idle" | "saving" | "restarting" | "failed";
+
+/** 「只显示启用的模型」开关的本地偏好：刷新后保持用户上次的选择。 */
+const ONLY_ENABLED_STORAGE_KEY = "ccp-ui-only-enabled-models";
+
+/**
+ * 白名单比较（忽略大小写与顺序）：用于判断乐观值是否已被服务端确认。
+ * 服务端会 trim / 去重，直接比较数组会把「其实已经生效」误判成未生效。
+ */
+function sameModelList(left: string[], right: string[]): boolean {
+  if (left.length !== right.length) return false;
+  const keys = new Set(left.map((slug) => slug.trim().toLowerCase()).filter(Boolean));
+  return right.every((slug) => keys.has(slug.trim().toLowerCase()));
+}
 
 function CopyButton({ text, title }: { text: string; title: string }) {
   const { t } = useI18n();
@@ -35,8 +48,12 @@ function CopyButton({ text, title }: { text: string; title: string }) {
     <button
       className="copy-icon-btn"
       title={title}
+      aria-label={title}
       onClick={() => {
-        void navigator.clipboard?.writeText(text).then(() => {
+        // 非安全上下文（http 局域网访问）下 clipboard 可能不存在，此时静默跳过。
+        const writing = navigator.clipboard?.writeText(text);
+        if (!writing) return;
+        void writing.then(() => {
           setCopied(true);
           window.setTimeout(() => setCopied(false), 1500);
         });
@@ -83,6 +100,19 @@ export function ConfigPage({
   const [modelsLoading, setModelsLoading] = useState(false);
   const [modelsError, setModelsError] = useState<string | null>(null);
   const [runtimeOpen, setRuntimeOpen] = useState(false);
+  /** 待提交的配置变更：连续操作（勾多个开关）合并成一次请求，只触发一次重启。 */
+  const pendingChangesRef = useRef<UiConfigChanges>({});
+  const pendingTimerRef = useRef<number | undefined>(undefined);
+  /** 待提交的模型白名单（乐观值）：连续点击模型开关时以它为基准计算下一次状态。 */
+  const [pendingEnabled, setPendingEnabled] = useState<string[] | null>(null);
+  /** 正在提交中的模型行（小写 slug）：用于行级 loading 指示与重复点击抑制。 */
+  const [pendingSlugs, setPendingSlugs] = useState<ReadonlySet<string>>(() => new Set<string>());
+  /** 「只显示启用的模型」筛选。 */
+  const [onlyEnabled, setOnlyEnabled] = useState<boolean>(
+    () => window.localStorage.getItem(ONLY_ENABLED_STORAGE_KEY) === "1",
+  );
+  /** 与 pendingChangesRef 一同合并的收尾回调：debounce 合并提交后统一清理行级 pending。 */
+  const pendingCallbacksRef = useRef<(() => void)[]>([]);
 
   const loadModels = useCallback((): void => {
     setModelsLoading(true);
@@ -105,6 +135,11 @@ export function ConfigPage({
     void getUiConfig().then((next) => {
       const logSize = splitLogSize(next.editable.maxGatewayLogBytes ?? 0);
       setConfig(next);
+      // 乐观白名单只在服务端确认后才撤销：保存请求返回时 config 仍是旧值，
+      // 立刻回退会让刚点过的开关闪回原状态，必须等到这次刷新拿到新值。
+      setPendingEnabled((current) =>
+        current === null || sameModelList(current, next.editable.enabledModels) ? null : current,
+      );
       setForm({
         zcode: next.editable.zcode,
         codebuddy: next.editable.codebuddy,
@@ -128,16 +163,61 @@ export function ConfigPage({
   const logSize = form ? parseLogSizeField(form.maxGatewayLogBytes, form.maxGatewayLogUnit) : null;
   const invalidLogSize = form !== null && logSize === null;
   const invalidRequestLogCount = form !== null && !isValidRequestLogCount(form.maxRequestLogs);
-  const dirty = useMemo(() => {
-    if (!config || !form) return false;
-    return form.zcode !== config.editable.zcode
-      || form.codebuddy !== config.editable.codebuddy
-      || form.cline !== config.editable.cline
-      || form.qodercn !== config.editable.qodercn
-      || form.requestLogging !== config.editable.requestLogging
-      || form.maxRequestLogs !== String(config.editable.maxRequestLogs ?? 0)
-      || parseLogSizeField(form.maxGatewayLogBytes, form.maxGatewayLogUnit)?.bytes !== (config.editable.maxGatewayLogBytes ?? 0);
-  }, [config, form]);
+  // 待提交白名单优先：连续点击模型开关时，以「下一次要提交的值」为基准计算，
+  // 否则第二次点击会基于尚未刷新的服务端值，把第一次点击丢掉。
+  const effectiveEnabled = pendingEnabled ?? (config?.editable.enabledModels ?? []);
+  const enabledSet = useMemo(
+    () => new Set(effectiveEnabled.map((slug) => slug.toLowerCase())),
+    [effectiveEnabled],
+  );
+  const allModelsEnabled = enabledSet.has("*");
+
+  const SAVE_DEBOUNCE_MS = 600;
+
+  /**
+   * 合并待保存字段，静默 600ms 后一次性提交：连续勾选多个开关只触发一次请求、
+   * 一次网关重启。重启完成由轮询恢复配置与模型清单。
+   *
+   * `onSettled` 在这次提交结束（成功或失败）后调用，用于清理行级 loading；
+   * debounce 合并的多次改动共用同一次收尾。
+   */
+  const queueSave = (change: UiConfigChanges, onSettled?: () => void): void => {
+    Object.assign(pendingChangesRef.current, change);
+    if (onSettled) pendingCallbacksRef.current.push(onSettled);
+    setSaveError(null);
+    setPhase("saving");
+    window.clearTimeout(pendingTimerRef.current);
+    pendingTimerRef.current = window.setTimeout(() => {
+      const changes = pendingChangesRef.current;
+      const callbacks = pendingCallbacksRef.current;
+      pendingChangesRef.current = {};
+      pendingCallbacksRef.current = [];
+      postUiConfig(changes)
+        .then((result) => {
+          // 这里刻意不清 pendingEnabled：响应到达时本地 config 还是旧白名单，
+          // 清掉会让开关回跳。交给 loadConfig 在拿到一致的新配置后再撤销。
+          if (result.restarting) setPhase("restarting");
+          else {
+            setPhase("idle");
+            loadConfig();
+            loadModels();
+          }
+        })
+        .catch((cause: unknown) => {
+          if (cause instanceof ApiError && cause.status === 401) {
+            onAuthExpired();
+            return;
+          }
+          // 保存失败：撤销乐观值，让界面回到服务端真值而不是停在假状态。
+          setPendingEnabled(null);
+          setSaveError(cause instanceof Error ? cause.message : String(cause));
+          setPhase("failed");
+        })
+        .finally(() => {
+          for (const done of callbacks) done();
+        });
+    }, SAVE_DEBOUNCE_MS);
+  };
   // 开关按本机配置探测结果显示：未检测到本地配置时隐藏，避免展示永远无法生效的入口；
   // 开关已开启时（例如用户删掉了本机配置）仍显示，便于在 UI 里关回。
   const showZcode = Boolean(config && (config.detected.zcode || config.editable.zcode));
@@ -151,49 +231,33 @@ export function ConfigPage({
     { key: "cline", visible: showCline, label: "labelCline", hint: "clineMissingHint" },
     { key: "qodercn", visible: showQodercn, label: "labelQodercn", hint: "qodercnMissingHint" },
   ] as const satisfies readonly { key: keyof FormState; visible: boolean; label: I18nKey; hint: I18nKey }[];
-  // 模型白名单：`*` 全部放行；否则只放行名单内的 slug（不区分大小写）。
-  // 缺省/空 = 全部模型开关默认关闭。
-  const enabledSet = useMemo(
-    () => new Set((config?.editable.enabledModels ?? []).map((slug) => slug.toLowerCase())),
-    [config],
-  );
-  const allModelsEnabled = enabledSet.has("*");
-
   /**
-   * 模型级开关：立即保存 enabledModels 白名单（可能触发网关重启，由轮询恢复）。
-   * 白名单为 `*`（全部放行）时关闭某个模型，会展开为「除它之外的全部已知模型」。
+   * 模型级开关：加入/移出白名单并 debounce 保存。白名单为 `*`（全部放行）时
+   * 关闭某个模型，会展开为「除它之外的全部已知模型」。
+   *
+   * 点击立即翻转（乐观值），提交期间该行显示 loading，直到服务端确认或报错。
    */
   const toggleModel = (slug: string, allKnownSlugs: string[]): void => {
-    if (!config || phase === "saving" || phase === "restarting") return;
-    const current = config.editable.enabledModels ?? [];
+    if (phase === "restarting") return;
     const key = slug.toLowerCase();
     let next: string[];
     if (allModelsEnabled) {
       next = allKnownSlugs.filter((item) => item.toLowerCase() !== key);
-    } else if (current.some((item) => item.toLowerCase() === key)) {
-      next = current.filter((item) => item.toLowerCase() !== key);
+    } else if (enabledSet.has(key)) {
+      next = effectiveEnabled.filter((item) => item.toLowerCase() !== key);
     } else {
-      next = [...current, slug];
+      next = [...effectiveEnabled, slug];
     }
-    setPhase("saving");
-    setSaveError(null);
-    postUiConfig({ enabledModels: next })
-      .then((result) => {
-        if (result.restarting) setPhase("restarting");
-        else {
-          setPhase("idle");
-          loadConfig();
-          loadModels();
-        }
-      })
-      .catch((cause: unknown) => {
-        if (cause instanceof ApiError && cause.status === 401) {
-          onAuthExpired();
-          return;
-        }
-        setSaveError(cause instanceof Error ? cause.message : String(cause));
-        setPhase("failed");
+    setPendingEnabled(next);
+    setPendingSlugs((prev) => new Set(prev).add(key));
+    queueSave({ enabledModels: next }, () => {
+      setPendingSlugs((prev) => {
+        if (!prev.has(key)) return prev;
+        const rest = new Set(prev);
+        rest.delete(key);
+        return rest;
       });
+    });
   };
 
   /** 网关重启完成后恢复：刷新配置与状态并提示已生效。 */
@@ -215,63 +279,11 @@ export function ConfigPage({
     return () => window.clearInterval(timer);
   }, [phase, loadConfig, loadModels, onStatusChange, onAuthExpired]);
 
-  /**
-   * 保存序列：写其余配置（可能触发网关重启，由轮询恢复）。模型列表跟随本机
-   * ZCode/CodeBuddy 登录态，无独立选择项。
-   */
-  const save = (): void => {
-    if (!config || !form || !logSize || invalidRequestLogCount) return;
-    const formSnapshot = form;
-    setPhase("saving");
-    setSaveError(null);
-    const run = async (): Promise<"restarting" | "done"> => {
-      const changes: UiConfigChanges = {};
-      if (formSnapshot.zcode !== config.editable.zcode) changes.zcode = formSnapshot.zcode;
-      if (formSnapshot.codebuddy !== config.editable.codebuddy) changes.codebuddy = formSnapshot.codebuddy;
-      if (formSnapshot.cline !== config.editable.cline) changes.cline = formSnapshot.cline;
-      if (formSnapshot.qodercn !== config.editable.qodercn) changes.qodercn = formSnapshot.qodercn;
-      if (formSnapshot.requestLogging !== config.editable.requestLogging) {
-        changes.requestLogging = formSnapshot.requestLogging;
-      }
-      if (formSnapshot.maxRequestLogs !== String(config.editable.maxRequestLogs ?? 0)) {
-        changes.maxRequestLogs = formSnapshot.maxRequestLogs.trim();
-      }
-      if (logSize.bytes !== (config.editable.maxGatewayLogBytes ?? 0)) {
-        changes.maxGatewayLogBytes = logSize.payload;
-      }
-      if (Object.keys(changes).length === 0) return "done";
-      const result = await postUiConfig(changes);
-      return result.restarting ? "restarting" : "done";
-    };
-    void run().then((outcome) => {
-      if (outcome === "restarting") setPhase("restarting");
-      else {
-        setPhase("idle");
-        loadConfig();
-      }
-    }).catch((cause: unknown) => {
-      if (cause instanceof ApiError && cause.status === 401) {
-        onAuthExpired();
-        return;
-      }
-      setSaveError(cause instanceof Error ? cause.message : String(cause));
-      setPhase("failed");
-    });
-  };
-
   const restartBanner = phase === "restarting" || phase === "saving";
 
   return (
     <div className="page">
-      <Header status={status}>
-        <button
-          className={`btn btn-save${dirty && phase === "idle" ? " dirty" : ""}`}
-          disabled={!dirty || invalidLogSize || invalidRequestLogCount || (phase !== "idle" && phase !== "failed")}
-          onClick={() => setPhase("confirm")}
-        >
-          <span>{phase === "saving" ? t("saving") : t("saveBtn")}</span>
-        </button>
-      </Header>
+      <Header status={status} />
       {restartBanner && (
         <div className="restart-banner">
           <span className="status-dot" />
@@ -300,16 +312,29 @@ export function ConfigPage({
           <div className="card-header" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
             <div className="card-title-group">
               <h2 className="card-title">{t("cardProvidersTitle")}</h2>
-              <span className="card-badge badge-editable">{t("badgeEditable")}</span>
             </div>
-            <button
-              className="btn btn-secondary"
-              style={{ padding: "4px 10px", fontSize: 11 }}
-              disabled={modelsLoading}
-              onClick={loadModels}
-            >
-              {modelsLoading ? t("saving") : t("refresh")}
-            </button>
+            <div className="card-header-actions">
+              <label className="inline-check" title={t("showOnlyEnabled")}>
+                <input
+                  type="checkbox"
+                  checked={onlyEnabled}
+                  onChange={(event) => {
+                    const checked = event.target.checked;
+                    setOnlyEnabled(checked);
+                    window.localStorage.setItem(ONLY_ENABLED_STORAGE_KEY, checked ? "1" : "0");
+                  }}
+                />
+                <span>{t("showOnlyEnabled")}</span>
+              </label>
+              <button
+                className="btn btn-secondary"
+                style={{ padding: "4px 10px", fontSize: 11 }}
+                disabled={modelsLoading}
+                onClick={loadModels}
+              >
+                {modelsLoading ? t("saving") : t("refresh")}
+              </button>
+            </div>
           </div>
           <div className="card-body">
             {modelsError && (
@@ -325,7 +350,11 @@ export function ConfigPage({
               const enabled = form?.[group.key] ?? false;
               const detected = config?.detected[group.key] ?? false;
               // 关闭的 provider 不展示其模型列表与提示，避免列表与开关状态不一致。
-              const slugs = enabled ? modelGroups?.[group.key] ?? [] : [];
+              const allSlugs = enabled ? modelGroups?.[group.key] ?? [] : [];
+              const isModelOff = (slug: string): boolean =>
+                !allModelsEnabled && !enabledSet.has(slug.toLowerCase());
+              // 「只显示启用的模型」只影响展示，不改变白名单语义（关闭的模型仍可被重新启用）。
+              const slugs = onlyEnabled ? allSlugs.filter((slug) => !isModelOff(slug)) : allSlugs;
               const allKnownSlugs = providerGroups.flatMap((entry) => modelGroups?.[entry.key] ?? []);
               return (
                 <div className="field-row" key={group.key}>
@@ -338,31 +367,64 @@ export function ConfigPage({
                         <input
                           type="checkbox"
                           checked={enabled}
-                          disabled={!config || !form}
-                          onChange={(event) => setForm(form ? { ...form, [group.key]: event.target.checked } : form)}
+                          disabled={!config || !form || phase === "restarting"}
+                          onChange={(event) => {
+                            const checked = event.target.checked;
+                            setForm(form ? { ...form, [group.key]: checked } : form);
+                            queueSave({ [group.key]: checked });
+                          }}
                         />
                         <span className="slider" />
                       </label>
-                      {enabled && <span className="field-keyname">{slugs.length}</span>}
+                      {enabled && <span className="field-keyname">{allSlugs.length}</span>}
                     </div>
                     {enabled && !detected && <p className="field-desc zcode-disabled-hint">{hint}</p>}
-                    {enabled && (slugs.length === 0
+                    {enabled && (allSlugs.length === 0
                       ? <p className="field-desc">{t("modelsEmpty")}</p>
-                      : (
+                      : slugs.length === 0
+                        ? <p className="field-desc">{t("modelsNoneEnabled")}</p>
+                        : (
                         <div style={{ maxHeight: 200, overflowY: "auto", scrollbarGutter: "stable", paddingRight: 6, marginTop: 8, display: "flex", flexDirection: "column", gap: 2 }}>
                           {slugs.map((slug) => {
-                            const off = !allModelsEnabled && !enabledSet.has(slug.toLowerCase());
+                            const off = isModelOff(slug);
+                            const pending = pendingSlugs.has(slug.toLowerCase());
                             return (
-                              <div key={slug} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, padding: "2px 0" }}>
+                              <div
+                                key={slug}
+                                className="model-row"
+                                aria-busy={pending || undefined}
+                              >
                                 <code style={{ fontSize: 11.5, color: off ? "var(--fg-muted)" : "var(--fg-primary)" }}>{slug}</code>
-                                <label
-                                  className="switch"
-                                  style={{ transform: "scale(0.72)", transformOrigin: "right center", margin: 0 }}
-                                  title={slug}
-                                >
-                                  <input type="checkbox" checked={!off} onChange={() => toggleModel(slug, allKnownSlugs)} />
-                                  <span className="slider" />
-                                </label>
+                                <div className="model-row-actions">
+                                  {pending && (
+                                    <svg
+                                      className="model-row-pending"
+                                      role="status"
+                                      aria-label={t("saving")}
+                                      viewBox="0 0 24 24"
+                                      fill="none"
+                                      stroke="currentColor"
+                                      strokeWidth="2.5"
+                                      strokeLinecap="round"
+                                    >
+                                      <path d="M21 12a9 9 0 1 1-6.2-8.56" />
+                                    </svg>
+                                  )}
+                                  <CopyButton text={slug} title={`${t("copyModelId")}: ${slug}`} />
+                                  <label
+                                    className={`switch${phase === "restarting" ? " disabled" : ""}`}
+                                    style={{ transform: "scale(0.72)", transformOrigin: "right center", margin: 0 }}
+                                    title={slug}
+                                  >
+                                    <input
+                                      type="checkbox"
+                                      checked={!off}
+                                      disabled={phase === "restarting"}
+                                      onChange={() => toggleModel(slug, allKnownSlugs)}
+                                    />
+                                    <span className="slider" />
+                                  </label>
+                                </div>
                               </div>
                             );
                           })}
@@ -404,8 +466,12 @@ export function ConfigPage({
                     <input
                       type="checkbox"
                       checked={form.requestLogging}
-                      onChange={(event) =>
-                        setForm({ ...form, requestLogging: event.target.checked })}
+                      disabled={phase === "restarting"}
+                      onChange={(event) => {
+                        const checked = event.target.checked;
+                        setForm({ ...form, requestLogging: checked });
+                        queueSave({ requestLogging: checked });
+                      }}
                     />
                     <span className="slider" />
                   </label>
@@ -436,6 +502,13 @@ export function ConfigPage({
                     aria-describedby={invalidRequestLogCount ? "request-log-count-error" : undefined}
                     value={form.maxRequestLogs}
                     onChange={(event) => setForm({ ...form, maxRequestLogs: event.target.value })}
+                    onBlur={() => {
+                      // 失焦才提交：输入中间态不落盘；非法值不保存，由 aria-invalid 提示。
+                      if (invalidRequestLogCount) return;
+                      if (form.maxRequestLogs !== String(config.editable.maxRequestLogs ?? 0)) {
+                        queueSave({ maxRequestLogs: form.maxRequestLogs.trim() });
+                      }
+                    }}
                   />
                   <p className="field-desc">{t("descMaxReqLogs")}</p>
                   {invalidRequestLogCount && <p id="request-log-count-error" className="field-desc error-text" role="alert">{t("requestLogCountInvalid")}</p>}
@@ -460,13 +533,29 @@ export function ConfigPage({
                       aria-describedby={invalidLogSize ? "log-size-error" : undefined}
                       value={form.maxGatewayLogBytes}
                       onChange={(event) => setForm({ ...form, maxGatewayLogBytes: event.target.value })}
-                    />
-                    <select
-                      className="input-text"
-                      aria-label={t("logSizeUnit")}
-                      value={form.maxGatewayLogUnit}
-                      onChange={(event) => setForm({ ...form, maxGatewayLogUnit: event.target.value as LogSizeUnit })}
-                    >
+                      onBlur={() => {
+                        if (invalidLogSize) return;
+                        const parsed = parseLogSizeField(form.maxGatewayLogBytes, form.maxGatewayLogUnit);
+                        if (parsed && parsed.bytes !== (config.editable.maxGatewayLogBytes ?? 0)) {
+                          queueSave({ maxGatewayLogBytes: parsed.payload });
+                        }
+                      }}
+                      />
+                      <select
+                        className="input-text"
+                        aria-label={t("logSizeUnit")}
+                        value={form.maxGatewayLogUnit}
+                        onChange={(event) => {
+                          const unit = event.target.value as LogSizeUnit;
+                          setForm({ ...form, maxGatewayLogUnit: unit });
+                          if (!invalidLogSize) {
+                            const parsed = parseLogSizeField(form.maxGatewayLogBytes, unit);
+                            if (parsed && parsed.bytes !== (config.editable.maxGatewayLogBytes ?? 0)) {
+                              queueSave({ maxGatewayLogBytes: parsed.payload });
+                            }
+                          }
+                        }}
+                      >
                       {LOG_SIZE_UNITS.map((unit) => <option key={unit} value={unit}>{unit}</option>)}
                     </select>
                   </div>
@@ -478,31 +567,6 @@ export function ConfigPage({
           )}
         </section>
       </main>
-
-      {phase === "confirm" && config && form && (
-        <div className="modal-overlay active" onClick={() => setPhase("idle")}>
-          <div className="modal-card" onClick={(event) => event.stopPropagation()}>
-            <div className="modal-title">
-              <svg style={{ width: 18, height: 18, color: "#f59e0b" }} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
-                <line x1="12" y1="9" x2="12" y2="13" />
-                <line x1="12" y1="17" x2="12.01" y2="17" />
-              </svg>
-              <span>{t("modalTitle")}</span>
-            </div>
-            <p className="modal-body">{t("modalBody")}</p>
-            <div className="modal-actions">
-              <button className="btn btn-secondary" onClick={() => setPhase("idle")}>{t("cancel")}</button>
-              <button
-                className="btn btn-save dirty"
-                onClick={() => save()}
-              >
-                {t("confirm")}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

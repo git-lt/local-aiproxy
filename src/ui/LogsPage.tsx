@@ -3,7 +3,10 @@ import {
   ApiError,
   getGatewayLogTail,
   getRequestLog,
+  getUiConfig,
+  getUiStatus,
   listRequestLogs,
+  postUiConfig,
   type RequestLogFile,
   type UiStatus,
 } from "./api.ts";
@@ -72,6 +75,10 @@ export function LogsPage({ status, onAuthExpired }: { status: UiStatus; onAuthEx
   const [pageSize, setPageSize] = useState(REQUEST_LOG_PAGE_SIZE);
   const [selected, setSelected] = useState<{ name: string; text: string; truncated: boolean } | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  /** 请求日志开关的提交期：提交中禁用开关，重启窗口内由轮询收尾。 */
+  const [loggingBusy, setLoggingBusy] = useState(false);
+  const [loggingRestarting, setLoggingRestarting] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
   /** 默认选中第一条用：loadFilesPage 的闭包里不能读过期的 selected state。 */
   const selectedNameRef = useRef<string | null>(null);
   const [gatewayFindOpen, setGatewayFindOpen] = useState(false);
@@ -120,6 +127,66 @@ export function LogsPage({ status, onAuthExpired }: { status: UiStatus; onAuthEx
       })
       .catch(handlePageApiError);
   }, [handlePageApiError]);
+
+  /** 开关的服务端真值：读配置文件的 requestLogging（UI 每个请求都从盘上重读配置，
+   * 因此 CLI 或本页写入后无需重启本进程即可读到新值）。 */
+  const loadLoggingConfig = useCallback((): void => {
+    void getUiConfig()
+      .then((next) => setLogging(next.editable.requestLogging))
+      .catch(handlePageApiError);
+  }, [handlePageApiError]);
+
+  useEffect(loadLoggingConfig, [loadLoggingConfig]);
+
+  /**
+   * 开关点击：先乐观翻转再落盘。落盘在有 LaunchAgent 时会触发网关重启，
+   * 因此重启态交给轮询收尾；失败则按原值回滚，界面不停在假状态。
+   */
+  const toggleRequestLogging = (enabled: boolean): void => {
+    if (loggingBusy || loggingRestarting) return;
+    const previous = logging;
+    setLogging(enabled);
+    setSaveError(null);
+    setLoggingBusy(true);
+    void postUiConfig({ requestLogging: enabled })
+      .then((result) => {
+        if (result.restarting) {
+          setLoggingRestarting(true);
+          return;
+        }
+        setLoggingBusy(false);
+        loadLoggingConfig();
+        loadFilesPage(page, pageSize);
+      })
+      .catch((cause: unknown) => {
+        setLogging(previous);
+        setLoggingBusy(false);
+        if (cause instanceof ApiError && cause.status === 401) {
+          onAuthExpired();
+          return;
+        }
+        setSaveError(cause instanceof Error ? cause.message : String(cause));
+      });
+  };
+
+  /** 重启窗口内的轮询：网关恢复后重读开关与目录，让界面回到服务端真值。 */
+  useEffect(() => {
+    if (!loggingRestarting) return;
+    const timer = window.setInterval(() => {
+      void getUiStatus()
+        .then(() => {
+          setLoggingRestarting(false);
+          setLoggingBusy(false);
+          loadLoggingConfig();
+          loadFilesPage(page, pageSize);
+        })
+        .catch((cause: unknown) => {
+          // 重启窗口内 healthz 可能短暂不可用，继续轮询；令牌失效例外。
+          if (cause instanceof ApiError && cause.status === 401) onAuthExpired();
+        });
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [loggingRestarting, loadLoggingConfig, loadFilesPage, page, pageSize, onAuthExpired]);
 
   useEffect(() => {
     if (tab === "gateway") refreshGateway();
@@ -213,6 +280,8 @@ export function LogsPage({ status, onAuthExpired }: { status: UiStatus; onAuthEx
 
   const isWs = (name: string): boolean => name.includes("-ws-");
   const maxPage = Math.max(1, Math.ceil(totalFiles / pageSize));
+  /** 提交中或重启窗口内禁用开关，避免并发两次落盘。 */
+  const loggingDisabled = loggingBusy || loggingRestarting;
 
   return (
     <div className="page logs-page">
@@ -253,21 +322,47 @@ export function LogsPage({ status, onAuthExpired }: { status: UiStatus; onAuthEx
             {gatewayLog?.truncated && <span className="truncated-note">{t("logTruncated")}</span>}
           </div>
         ) : (
-          <button
-            className="btn btn-secondary"
-            style={{ padding: "4px 8px", fontSize: 11 }}
-            onClick={() => loadFilesPage(page, pageSize)}
-            title={t("refreshListTitle")}
-          >
-            <svg style={{ width: 12, height: 12 }} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <polyline points="23 4 23 10 17 10" />
-              <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
-            </svg>
-            <span>{t("refreshList")}</span>
-          </button>
+          <div className="drawer-toolbar">
+            <label className="toolbar-switch" title={t("descReqLogging")}>
+              <span>{t("labelReqLogging")}</span>
+              <span className={`switch${loggingDisabled ? " disabled" : ""}`}>
+                <input
+                  type="checkbox"
+                  checked={logging}
+                  disabled={loggingDisabled}
+                  aria-label={t("labelReqLogging")}
+                  onChange={(event) => toggleRequestLogging(event.target.checked)}
+                />
+                <span className="slider" />
+              </span>
+            </label>
+            <button
+              className="btn btn-secondary"
+              style={{ padding: "4px 8px", fontSize: 11 }}
+              onClick={() => loadFilesPage(page, pageSize)}
+              title={t("refreshListTitle")}
+            >
+              <svg style={{ width: 12, height: 12 }} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <polyline points="23 4 23 10 17 10" />
+                <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
+              </svg>
+              <span>{t("refreshList")}</span>
+            </button>
+          </div>
         )}
       </div>
 
+      {(loggingBusy || loggingRestarting) && (
+        <div className="restart-banner">
+          <span className="status-dot" />
+          {loggingRestarting ? t("savedRestarting") : t("saving")}
+        </div>
+      )}
+      {saveError && (
+        <div className="restart-banner error">
+          <span>{t("saveFailed")}: {saveError}</span>
+        </div>
+      )}
       {loadError && (
         <div className="restart-banner error">
           <span>{t("loadFailed")}: {loadError}</span>

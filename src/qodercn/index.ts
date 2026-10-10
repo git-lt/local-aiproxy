@@ -39,6 +39,8 @@ export interface QodercnDependencies {
   baseUrl?: string;
   fetch?: (url: string, init: RequestInit) => Promise<Response>;
   catalogCache?: QodercnCatalogCache;
+  /** 目录缓存 TTL；0 表示每次都强拉远端（Web UI 的刷新按钮用）。 */
+  catalogTtlMs?: number;
   processLog?: ProcessLogTarget;
 }
 
@@ -91,6 +93,7 @@ export function createQodercnAdapter(config: GatewayConfig, dependencies: Qoderc
         if (!response.ok) throw new Error(`qodercn_models_http_${response.status}`);
         return response.json();
       },
+      ...(dependencies.catalogTtlMs === undefined ? {} : { ttlMs: dependencies.catalogTtlMs }),
     });
   }
   const activeRequests = new Set<AbortController>();

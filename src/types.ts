@@ -52,6 +52,12 @@ export interface GatewayConfig {
   codebuddyRegion?: CodebuddyRegion;
   /** 是否启用 Cline 官方 API（cline/ 前缀）入口；默认关闭。凭据为运行时目录的 cline-api-key 文件。 */
   cline?: boolean;
+  /**
+   * 额外展示的 Cline 模型 ID（OpenRouter 风格，如 `google/gemini-3.8-flash`）：
+   * 目录默认只含免费模型，列在这里的模型无论免费与否都会以 `cline/` 前缀展示
+   * （调用消耗用户自己的 Cline API Key 额度）。
+   */
+  clineExtraModels?: string[];
   /** 是否启用 QoderCN（qodercn/ 前缀）入口；默认关闭。凭据为本机 QoderCN/通义灵码客户端的登录缓存（只读）。 */
   qodercn?: boolean;
   /**

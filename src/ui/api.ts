@@ -127,6 +127,10 @@ export const getUiConfig = (): Promise<UiConfig> => api<UiConfig>("/ui/api/confi
 export const postUiConfig = (changes: UiConfigChanges): Promise<{ restarting: boolean }> =>
   api<{ restarting: boolean }>("/ui/api/config", { method: "POST", json: changes });
 
+/** 只重启网关服务，不改动任何配置字段。 */
+export const postUiRestart = (): Promise<{ restarting: boolean }> =>
+  api<{ restarting: boolean }>("/ui/api/restart", { method: "POST" });
+
 /** 各 provider 当前对外可见的模型清单。 */
 export interface UiProviderModels {
   zcode: string[];
@@ -135,9 +139,9 @@ export interface UiProviderModels {
   qodercn: string[];
 }
 
-/** 拉取三个 provider 的模型清单（服务端现场构建 adapter，用完即回收）。 */
+/** 拉取各 provider 的模型清单（refresh=1 绕过服务端目录缓存，强制重拉）。 */
 export const getProviderModels = (): Promise<UiProviderModels> =>
-  api<UiProviderModels>("/ui/api/models");
+  api<UiProviderModels>("/ui/api/models?refresh=1");
 
 export const getGatewayLogTail = (): Promise<{ text: string; truncated: boolean }> =>
   api<{ text: string; truncated: boolean }>("/ui/api/logs/gateway");

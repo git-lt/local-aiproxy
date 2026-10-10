@@ -67,7 +67,7 @@ interface InstallState {
 }
 
 function usage() {
-  console.log(`local-aiproxy - Bun gateway for Codex Desktop and CLI
+  console.log(`local-aiproxy - local gateway that turns client logins into an OpenAI-compatible API
 
 Usage:
   ${COMMAND_NAME} start         create config.json if missing, register the
@@ -85,18 +85,20 @@ Setup:
   start creates ~/.local-aiproxy/config.json with default settings on
   first run; edit that file to set the port (default ${DEFAULTS.port}) and
   enable the local integrations (zcode / codebuddy).
-  This tool never reads or writes ~/.codex/config.toml: point Codex at the
-  gateway yourself (openai_base_url = http://127.0.0.1:${DEFAULTS.port}${DEFAULTS.mountPath}).
+  This tool never reads or writes client configuration: point your client at
+  the gateway yourself (base_url = http://127.0.0.1:${DEFAULTS.port}${DEFAULTS.mountPath}).
 
 Models:
-  models                list models from the local ZCode and CodeBuddy logins
+  models                list models from the local client logins
   models --zcode        only the ZCode group
   models --codebuddy    only the CodeBuddy/WorkBuddy group
+  models --cline        only the Cline group
+  models --qodercn      only the QoderCN group
   models --json         machine-readable output
   models --refresh      also refresh the CodeBuddy catalog
 
   The model list follows the local client logins; the gateway never edits
-  ~/.codex/config.toml.
+  client configuration.
 
 Config:
   config                print the current gateway settings
@@ -118,9 +120,8 @@ Config:
   options may be combined; every change restarts the gateway automatically
 
 Routing:
-  Codex Responses requests are translated and forwarded to the local
-  ZCode or CodeBuddy/WorkBuddy login; there is no third-party upstream
-  and no official ChatGPT fallback.
+  Responses requests are translated and forwarded to the matching local
+  client login; there is no third-party upstream and no fallback.
 
 Web UI:
   web [--start]       run the web ui in the foreground (default): check the
@@ -460,7 +461,7 @@ export async function uninstall(deps: GatewayUninstallDeps = {}): Promise<void> 
   removeAgent(paths.webUiLaunchAgent);
   removeManagedRuntimeFiles(paths, { preserveGatewayConfig: true });
 
-  console.log("Uninstalled. config.json was preserved; ~/.codex was not touched at all.");
+  console.log("Uninstalled. config.json was preserved; client home directories were not touched at all.");
 }
 
 /**

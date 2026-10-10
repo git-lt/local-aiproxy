@@ -9,7 +9,7 @@
   没有第三方上游，也没有官方 ChatGPT 回落。
 - `zcode/`：ZCode 配置缓存、目录、协议转换与网关适配。
 - `codebuddy/`：CodeBuddy/WorkBuddy 凭据只读消费、目录拉取与双向协议转换。
-- `cline/`：Cline 官方 API 适配（凭据为运行时目录的 `cline-api-key` 文件，目录来自公开 `/models`）。
+- `cline/`：Cline 官方 API 适配（凭据为运行时目录的 `cline-api-key` 文件，目录来自公开 `/models`，默认只展示免费模型，`clineExtraModels` 可指定额外展示的付费模型）。
 - `qodercn/`：QoderCN 远端 API 适配（凭据为本机 QoderCN/通义灵码客户端登录缓存，只读解密，不连 IPC）。
 - `catalog.ts`：模型目录。
 - `webui.ts`：内建 Web 配置界面 `/ui`（React 源码在 `src/ui/`，改动 UI 后须重跑 `bun run build:ui`）。

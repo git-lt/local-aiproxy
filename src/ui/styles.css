@@ -463,6 +463,51 @@ input:checked + .slider:before {
   color: #f59e0b;
 }
 
+/* 模型列表：行内筛选勾选、行级 loading 与操作区 */
+.card-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+.inline-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  color: var(--fg-secondary);
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+.inline-check input {
+  accent-color: var(--accent);
+  cursor: pointer;
+  margin: 0;
+}
+.model-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 0;
+}
+.model-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.model-row-pending {
+  width: 12px;
+  height: 12px;
+  color: var(--fg-muted);
+  animation: ui-spin 0.9s linear infinite;
+}
+@keyframes ui-spin {
+  to { transform: rotate(360deg); }
+}
+
 /* 输入框 */
 .input-text, .input-number {
   background: var(--bg-input-editable);
@@ -902,6 +947,16 @@ input:checked + .slider:before {
   accent-color: var(--accent);
 }
 
+/* 日志页工具栏里的请求日志开关：文案 + .switch 滑块（与配置页同名控件同款）。 */
+.toolbar-switch {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--fg-secondary);
+  cursor: pointer;
+}
+
 /* ---------- 共享文本视图与浮动查找框 ---------- */
 /* text-view-wrap：外层负责定位浮动查找框，内层负责滚动并承接焦点（快捷键作用域）。 */
 .text-view-wrap {
@@ -1208,59 +1263,7 @@ mark.log-hit.current {
 }
 .preview-section-title:first-child { margin-top: 0; }
 
-/* ---------- 弹窗 / 启动屏 ---------- */
-.modal-overlay {
-  position: fixed;
-  top: 0; left: 0; right: 0; bottom: 0;
-  background: rgba(0, 0, 0, 0.65);
-  backdrop-filter: blur(4px);
-  z-index: 100;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity 0.2s ease;
-}
-.modal-overlay.active {
-  opacity: 1;
-  pointer-events: auto;
-}
-
-.modal-card {
-  width: 400px;
-  max-width: calc(100vw - 48px);
-  background: #14171d;
-  border: 1px solid var(--border-card);
-  border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-lg);
-  padding: 22px;
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-}
-
-.modal-title {
-  font-size: 14px;
-  font-weight: 600;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.modal-body {
-  font-size: 12.5px;
-  color: var(--fg-secondary);
-  line-height: 1.5;
-}
-
-.modal-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
-  margin-top: 4px;
-}
-
+/* ---------- 启动屏 ---------- */
 .token-screen {
   min-height: 100vh;
   display: flex;

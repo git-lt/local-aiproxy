@@ -63,6 +63,8 @@ export interface ClineDependencies {
   providersFile?: string;
   fetch?: (url: string, init: RequestInit) => Promise<Response>;
   catalogCache?: ClineCatalogCache;
+  /** 目录缓存 TTL；0 表示每次都强拉远端（Web UI 的刷新按钮用）。 */
+  catalogTtlMs?: number;
   processLog?: ProcessLogTarget;
 }
 
@@ -117,6 +119,11 @@ export function createClineAdapter(config: GatewayConfig, dependencies: ClineDep
         const list = isZcodeRecord(payload) && Array.isArray(payload.data) ? payload.data : Array.isArray(payload) ? payload : [];
         return list.filter(isZcodeRecord) as unknown as ClineUpstreamModel[];
       },
+      // clineExtraModels 指定的付费模型跟随展示（调用消耗用户自己的 API Key 额度）。
+      extraIds: Array.isArray(config.clineExtraModels)
+        ? config.clineExtraModels.filter((id): id is string => typeof id === "string")
+        : [],
+      ...(dependencies.catalogTtlMs === undefined ? {} : { ttlMs: dependencies.catalogTtlMs }),
     });
   }
   const activeRequests = new Set<AbortController>();

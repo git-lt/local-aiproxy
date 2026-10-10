@@ -128,6 +128,11 @@
       "type": "boolean",
       "default": false
     },
+    "clineExtraModels": {
+      "description": "额外展示的 Cline 模型 ID（OpenRouter 风格，如 google/gemini-3.8-flash）：目录默认只含免费模型，列在这里的模型无论免费与否都会以 cline/ 前缀展示，调用消耗用户自己的 Cline API Key 额度。",
+      "type": "array",
+      "items": { "type": "string" }
+    },
     "enabledModels": {
       "description": "对外模型白名单（slug，匹配不区分大小写，`*` 表示全部放行）：/v1/models 只展示名单内的模型，转发请求同理；缺省或空数组表示全部模型开关关闭（一个都不放行）。",
       "type": "array",

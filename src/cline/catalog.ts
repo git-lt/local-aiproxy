@@ -38,13 +38,19 @@ export function isFreeModel(entry: ClineUpstreamModel): boolean {
   return zeroPricing(entry);
 }
 
-export function buildClineCatalog(entries: ClineUpstreamModel[]): ModelCatalog {
+/**
+ * 构建对外目录：默认只收录免费模型；`extraIds`（config 的 clineExtraModels）
+ * 指定的模型无论免费与否都会收录——通常是付费模型，调用消耗用户自己的 API Key。
+ */
+export function buildClineCatalog(entries: ClineUpstreamModel[], extraIds: string[] = []): ModelCatalog {
+  const extraSet = new Set(extraIds.map((id) => id.trim().toLowerCase()).filter(Boolean));
   const models: ModelCatalog["models"] = [];
   const seen = new Set<string>();
   for (const entry of entries) {
-    if (!isRecord(entry) || !isFreeModel(entry)) continue;
+    if (!isRecord(entry)) continue;
     const id = typeof entry.id === "string" ? entry.id.trim() : "";
     if (!id || id.includes(" ") || seen.has(id)) continue;
+    if (!extraSet.has(id.toLowerCase()) && !isFreeModel(entry)) continue;
     seen.add(id);
     const name = typeof entry.name === "string" && entry.name ? entry.name : id;
     const contextLength = Number(entry.context_length);
@@ -70,6 +76,8 @@ export interface ClineCatalogCache {
 
 export function createClineCatalogCache(options: {
   fetchModels: () => Promise<ClineUpstreamModel[]>;
+  /** 额外收录的模型 ID（config 的 clineExtraModels），进程生命周期内不变。 */
+  extraIds?: string[];
   ttlMs?: number;
   now?: () => number;
 }): ClineCatalogCache {
@@ -85,7 +93,7 @@ export function createClineCatalogCache(options: {
     const nextDigest = catalogDigest(entries);
     if (nextDigest !== digest) {
       digest = nextDigest;
-      cached = buildClineCatalog(entries);
+      cached = buildClineCatalog(entries, options.extraIds ?? []);
     }
     fetchedAt = now();
   };

@@ -51,6 +51,8 @@ test("cline 路由：local-proxy 前缀剥离、上游收到裸模型 ID 与 Bea
     fs.writeFileSync(apiKeyFile, `${API_KEY}\n`, { mode: 0o600 });
     const config: GatewayConfig = {
       host: "127.0.0.1", port: 8320, mountPath: "/v1", zcode: false, codebuddy: false, cline: true, enabledModels: ["*"],
+      // clineExtraModels 指定的付费模型跟随展示（调用消耗用户自己的 API Key 额度）。
+      clineExtraModels: ["openai/gpt-paid"],
       catalogPath: path.join(directory, "catalog.json"), logDir: path.join(directory, "logs"),
       requestLogging: true,
     };
@@ -81,9 +83,9 @@ test("cline 路由：local-proxy 前缀剥离、上游收到裸模型 ID 与 Bea
         // 隔离真实 ~/.cline 登录态：本用例只测 API Key 模式。
         providersFile: path.join(directory, "no-providers.json"),
       });
-      // 目录：只保留免费条目（:free 后缀或 pricing 全 0）并加 cline/ 前缀。
+      // 目录：免费条目（:free 后缀或 pricing 全 0）+ clineExtraModels 指定的付费例外，均加 cline/ 前缀。
       const models = await (await handler(new Request("http://127.0.0.1:8320/v1/models"))).json() as Json;
-      assert.deepEqual(models.data.map((m: Json) => m.id), ["cline/z-ai/glm-5.3-prime:free", "cline/deepseek/deepseek-v4-flash"]);
+      assert.deepEqual(models.data.map((m: Json) => m.id), ["cline/z-ai/glm-5.3-prime:free", "cline/deepseek/deepseek-v4-flash", "cline/openai/gpt-paid"]);
       // opencodex 原样转发 local-proxy/ 前缀的 slug 也能路由。
       const response = await handler(new Request("http://127.0.0.1:8320/v1/responses", {
         method: "POST",

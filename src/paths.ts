@@ -95,10 +95,38 @@ export function migrateRuntimeHome(
   if (legacy === paths.runtimeHome) return undefined;
   if (!isDirectory(legacy) || fs.existsSync(paths.runtimeHome)) return undefined;
   fs.cpSync(legacy, paths.runtimeHome, { recursive: true });
+  rewriteLegacyConfigPaths(path.join(paths.runtimeHome, "config.json"), legacy, paths.runtimeHome);
   let backup = `${legacy}.bak`;
   if (fs.existsSync(backup)) backup = `${legacy}.bak-${now()}`;
   fs.renameSync(legacy, backup);
   return { from: legacy, to: paths.runtimeHome, backup };
+}
+
+/**
+ * 迁移后把 config.json 里指向旧目录的路径字段（catalogPath、logDir）改写到新家，
+ * 否则目录缓存与请求日志会继续落在旧位置。
+ */
+function rewriteLegacyConfigPaths(configFile: string, legacyDir: string, newDir: string): void {
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(fs.readFileSync(configFile, "utf8")) as Record<string, unknown>;
+  } catch {
+    return;
+  }
+  let dirty = false;
+  for (const field of ["catalogPath", "logDir"] as const) {
+    const value = parsed[field];
+    if (typeof value === "string" && value.startsWith(`${legacyDir}${path.sep}`)) {
+      parsed[field] = path.join(newDir, path.relative(legacyDir, value));
+      dirty = true;
+    }
+  }
+  if (!dirty) return;
+  try {
+    fs.writeFileSync(configFile, `${JSON.stringify(parsed, null, 2)}\n`, { mode: 0o600 });
+  } catch {
+    // 改写失败不阻断迁移；字段仍指向旧目录时用户可手动修正。
+  }
 }
 
 /**
