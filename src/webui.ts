@@ -423,6 +423,56 @@ function requestLogsResponse(config: GatewayConfig, url: URL): Response {
   });
 }
 
+/**
+ * 正在写入的日志保护窗口（毫秒）。
+ *
+ * 请求日志由各 adapter 在**请求结束时一次性**落盘（`fs.appendFileSync`，无长期句柄），
+ * 写入窗口本身极短；这里仍保留一段保护期，让「刚写入/可能仍在写」的文件不被删掉，
+ * 避免清空动作把刚产生的日志从用户眼前抹掉。mtime 每次写都会刷新，因此可用它判定。
+ */
+const CLEAR_PROTECT_MS = 60_000;
+
+/**
+ * 清空请求日志目录：只删请求日志文件本身。
+ *
+ * 刻意不碰 `gateway.log` / `webui.log`——它们由 launchd 持有句柄，删除后进程仍写入
+ * 已 unlink 的 inode，磁盘空间不会释放，还丢掉了排查线索；目录、配置与审计文件同理。
+ * 判定沿用 `isRequestLogName`，与请求日志保留策略（pruneLogDir）同一套口径。
+ *
+ * 返回 `{removed, kept}`：kept 是因落在保护窗口内而跳过的文件数。
+ */
+function clearRequestLogsResponse(config: GatewayConfig): Response {
+  const dir = requestLogDir(config);
+  let names: string[];
+  try {
+    names = fs.readdirSync(dir);
+  } catch {
+    return Response.json({ removed: 0, kept: 0 });
+  }
+  const now = Date.now();
+  let removed = 0;
+  let kept = 0;
+  for (const name of names) {
+    if (!isRequestLogName(name)) continue;
+    const target = safeLogPath(dir, name);
+    if (!target) continue;
+    let mtimeMs: number;
+    try {
+      mtimeMs = fs.statSync(target).mtimeMs;
+    } catch {
+      continue;
+    }
+    if (now - mtimeMs < CLEAR_PROTECT_MS) { kept++; continue; }
+    try {
+      fs.rmSync(target, { force: true });
+      removed++;
+    } catch {
+      // 单个文件删不掉（权限/已被移走）不影响其余。
+    }
+  }
+  return Response.json({ removed, kept });
+}
+
 function requestLogContentResponse(config: GatewayConfig, name: string): Response {
   if (!name || !isRequestLogName(name)) return notFound();
   const target = safeLogPath(requestLogDir(config), name);
@@ -523,6 +573,8 @@ export async function handleWebUiRequest(request: Request, config: GatewayConfig
   }
 
   if (route === "logs/gateway" && request.method === "GET") return gatewayLogResponse(ctx.paths);
+  // 必须排在 logs/requests/ 的单文件读取之前：clear 也会命中那个前缀。
+  if (route === "logs/requests/clear" && request.method === "POST") return clearRequestLogsResponse(config);
   if (route === "logs/requests" && request.method === "GET") {
     return requestLogsResponse(config, new URL(request.url));
   }

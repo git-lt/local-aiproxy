@@ -479,6 +479,94 @@ test("request log listing reports logging=false and lists nothing when request l
   }
 });
 
+/** 把指定日志文件的 mtime 推到保护窗口之外（默认 60s），模拟「已落盘一段时间」。 */
+function ageLogs(dir: string, names: string[], ageMs = 10 * 60 * 1000): void {
+  const when = new Date(Date.now() - ageMs);
+  for (const name of names) fs.utimesSync(path.join(dir, name), when, when);
+}
+
+test("clearing request logs deletes only request log files and leaves process logs intact", async () => {
+  const { handler, paths, home } = await makeFixture();
+  try {
+    const dir = paths.logDir;
+    fs.writeFileSync(path.join(dir, "codebuddy-v1-responses-http-20260913120000.log"), "a");
+    fs.writeFileSync(path.join(dir, "codebuddy-v1-live-ws-3f2a9c1d.log"), "b");
+    // 同目录下并非请求日志的文件：一律不得被删。
+    fs.writeFileSync(path.join(dir, "gateway.log"), "c");
+    fs.writeFileSync(path.join(dir, "notes.txt"), "d");
+    fs.writeFileSync(path.join(dir, "webui.log"), "e");
+    // 清空只删「陈旧」日志：刚落盘的文件在保护窗口内，必须显式把 mtime 推旧。
+    ageLogs(dir, ["codebuddy-v1-responses-http-20260913120000.log", "codebuddy-v1-live-ws-3f2a9c1d.log"]);
+
+    const response = await handler(authedRequest("/ui/api/logs/requests/clear", { method: "POST" }));
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { removed: 2, kept: 0 });
+    assert.deepEqual(fs.readdirSync(dir).sort(), ["gateway.log", "notes.txt", "webui.log"]);
+
+    // 幂等：目录已空时再调一次返回 0，不报错。
+    const again = await handler(authedRequest("/ui/api/logs/requests/clear", { method: "POST" }));
+    assert.equal(again.status, 200);
+    assert.deepEqual(await again.json(), { removed: 0, kept: 0 });
+
+    const listed = await (await handler(authedRequest("/ui/api/logs/requests"))).json() as { total: number };
+    assert.equal(listed.total, 0);
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("clearing request logs keeps files inside the in-flight protection window", async () => {
+  const { handler, paths, home } = await makeFixture();
+  try {
+    const fresh = "codebuddy-v1-responses-http-20260913120009.log";
+    const stale = "codebuddy-v1-responses-http-20260913120000.log";
+    // 刚写完的日志（mtime=now）视为正在写入，必须跳过；陈旧的照删。
+    fs.writeFileSync(path.join(paths.logDir, fresh), "x");
+    fs.writeFileSync(path.join(paths.logDir, stale), "y");
+    ageLogs(paths.logDir, [stale]);
+
+    const response = await handler(authedRequest("/ui/api/logs/requests/clear", { method: "POST" }));
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { removed: 1, kept: 1 });
+    assert.deepEqual(fs.readdirSync(paths.logDir), [fresh], "正在写入的日志文件必须保留");
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("clearing request logs works while request logging is off (leftovers must be removable)", async () => {
+  const { handler, paths, home } = await makeFixture({ config: { requestLogging: false } });
+  try {
+    fs.writeFileSync(path.join(paths.logDir, "cliproxy-v1-responses-http-20260913120000.log"), "legacy");
+    ageLogs(paths.logDir, ["cliproxy-v1-responses-http-20260913120000.log"]);
+    const response = await handler(authedRequest("/ui/api/logs/requests/clear", { method: "POST" }));
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { removed: 1, kept: 0 });
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("clearing request logs requires POST and is not reachable as a log file name", async () => {
+  const { handler, paths, home } = await makeFixture();
+  try {
+    fs.writeFileSync(path.join(paths.logDir, "cliproxy-v1-responses-http-20260913120000.log"), "x");
+    // GET 不得触发删除：否则刷新列表就能把日志清空。
+    const get = await handler(authedRequest("/ui/api/logs/requests/clear"));
+    assert.equal(get.status, 404);
+    assert.equal(
+      fs.readdirSync(paths.logDir).includes("cliproxy-v1-responses-http-20260913120000.log"),
+      true,
+      "GET 不得删除任何日志文件",
+    );
+    // 未鉴权请求照旧被拒（复用 BASE，别写死端口）。
+    const unauthed = new Request(`${BASE}/ui/api/logs/requests/clear`, { method: "POST" });
+    assert.equal((await handler(unauthed)).status, 401);
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
 test("request log content rejects traversal, non-log names, and serves a valid tail", async () => {
   const { handler, paths, home } = await makeFixture();
   try {

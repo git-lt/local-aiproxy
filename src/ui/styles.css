@@ -210,6 +210,16 @@ button {
   color: var(--fg-primary);
 }
 
+/* 破坏性操作（清空日志）：常态低调，只在悬停时提示风险 */
+.btn-danger {
+  color: var(--fg-muted);
+}
+.btn-danger:hover:not(:disabled) {
+  background: rgba(248, 113, 113, 0.12);
+  border-color: rgba(248, 113, 113, 0.45);
+  color: #f87171;
+}
+
 .lang-segmented {
   display: flex;
   background: var(--bg-card);

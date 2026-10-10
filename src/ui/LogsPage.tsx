@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ApiError,
+  clearRequestLogs,
   getGatewayLogTail,
   getRequestLog,
   getUiConfig,
@@ -79,6 +80,9 @@ export function LogsPage({ status, onAuthExpired }: { status: UiStatus; onAuthEx
   const [loggingBusy, setLoggingBusy] = useState(false);
   const [loggingRestarting, setLoggingRestarting] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  /** 清空请求日志：提交期禁用按钮，成功后短暂提示删除数量。 */
+  const [clearing, setClearing] = useState(false);
+  const [clearNote, setClearNote] = useState<string | null>(null);
   /** 默认选中第一条用：loadFilesPage 的闭包里不能读过期的 selected state。 */
   const selectedNameRef = useRef<string | null>(null);
   const [gatewayFindOpen, setGatewayFindOpen] = useState(false);
@@ -167,6 +171,40 @@ export function LogsPage({ status, onAuthExpired }: { status: UiStatus; onAuthEx
         }
         setSaveError(cause instanceof Error ? cause.message : String(cause));
       });
+  };
+
+  /**
+   * 清空请求日志：删除全部请求日志文件。不可恢复，故先二次确认。
+   *
+   * 只清请求日志：网关进程日志（gateway.log）由 launchd 持有句柄，删了不释放空间，
+   * 服务端也刻意跳过这类文件。
+   */
+  const clearLogs = (): void => {
+    if (clearing || totalFiles === 0) return;
+    if (!window.confirm(t("clearLogsConfirm").replaceAll("{total}", String(totalFiles)))) return;
+    setClearing(true);
+    setClearNote(null);
+    void clearRequestLogs()
+      .then((result) => {
+        const cleared = t("logsCleared").replaceAll("{removed}", String(result.removed));
+        // 有正在写入的文件被保护下来时必须说清楚，否则用户会以为清空没生效。
+        setClearNote(result.kept > 0
+          ? cleared + t("logsKept").replaceAll("{kept}", String(result.kept))
+          : cleared);
+        // 已选中的预览文件可能刚被删掉：清掉选中态并回到第一页，避免读到 404。
+        selectedNameRef.current = null;
+        setSelected(null);
+        setPage(1);
+        loadFilesPage(1, pageSize);
+      })
+      .catch((cause: unknown) => {
+        if (cause instanceof ApiError && cause.status === 401) {
+          onAuthExpired();
+          return;
+        }
+        setSaveError(cause instanceof Error ? cause.message : String(cause));
+      })
+      .finally(() => setClearing(false));
   };
 
   /** 重启窗口内的轮询：网关恢复后重读开关与目录，让界面回到服务端真值。 */
@@ -348,6 +386,20 @@ export function LogsPage({ status, onAuthExpired }: { status: UiStatus; onAuthEx
               </svg>
               <span>{t("refreshList")}</span>
             </button>
+            <button
+              className="btn btn-secondary btn-danger"
+              style={{ padding: "4px 8px", fontSize: 11 }}
+              disabled={clearing || totalFiles === 0}
+              onClick={clearLogs}
+              title={t("clearLogsTitle")}
+            >
+              <svg style={{ width: 12, height: 12 }} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <polyline points="3 6 5 6 21 6" />
+                <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+                <path d="M10 11v6M14 11v6" />
+              </svg>
+              <span>{clearing ? t("saving") : t("clearLogs")}</span>
+            </button>
           </div>
         )}
       </div>
@@ -356,6 +408,12 @@ export function LogsPage({ status, onAuthExpired }: { status: UiStatus; onAuthEx
         <div className="restart-banner">
           <span className="status-dot" />
           {loggingRestarting ? t("savedRestarting") : t("saving")}
+        </div>
+      )}
+      {clearNote && (
+        <div className="restart-banner">
+          <span className="status-dot" />
+          {clearNote}
         </div>
       )}
       {saveError && (

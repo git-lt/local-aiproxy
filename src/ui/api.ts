@@ -150,3 +150,8 @@ export const listRequestLogs = (offset: number, limit: number): Promise<RequestL
 export const getRequestLog = (name: string): Promise<{ name: string; text: string; truncated: boolean }> =>
   api<{ name: string; text: string; truncated: boolean }>(
     `/ui/api/logs/requests/${encodeURIComponent(name)}`);
+
+/** 清空请求日志目录：只删请求日志文件，gateway.log 等进程日志保留。
+ *  `kept` 是落在保护窗口内、未被删除的「正在写入」文件数。 */
+export const clearRequestLogs = (): Promise<{ removed: number; kept: number }> =>
+  api<{ removed: number; kept: number }>("/ui/api/logs/requests/clear", { method: "POST" });
