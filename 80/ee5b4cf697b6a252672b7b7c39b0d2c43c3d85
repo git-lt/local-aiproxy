@@ -1,0 +1,49 @@
+test/webui.test.ts
+  s_ce354d199deb57::t_e8a6a831acebce 482-487
+  s_ce354d199deb57::t_d1b8a289fffb29 498-499,503,509,518-536,541,544
+  s_ce354d199deb57::t_fa8849cca6d1ba 562-563
+  s_ce354d199deb57::t_4bf5308c61013f 488-497,500,502,504-506,508,510-517,537-540,543,545-561,564-569
+  s_ce354d199deb57::t_f7a470cfc7bf75 501
+  s_ce354d199deb57::t_03e41f91fba9ab 507
+  s_ce354d199deb57::t_9b2296a11e51fe 542
+src/ui/api.ts
+  s_ce354d199deb57::t_b06d35e87b447a 153
+  s_ce354d199deb57::t_3a595abcfebb58 154-157
+src/ui/LogsPage.tsx
+  s_ce354d199deb57::t_85417b1c4a4b50 4
+  s_ce354d199deb57::t_225810d9284ac7 83-85
+  s_ce354d199deb57::t_ad8a57fc9459ff 176-188,194-209
+  s_ce354d199deb57::t_41a48fdb79e433 189-193
+  s_ce354d199deb57::t_6d92babeb8d10f 389-402
+  s_ce354d199deb57::t_fd09fb3812667b 413-418
+src/ui/i18n.tsx
+  s_ce354d199deb57::t_7202099161642d 142
+  s_ce354d199deb57::t_a59c27d22588bd 64
+  s_ce354d199deb57::t_20ff8546cf5913 60-63
+  s_ce354d199deb57::t_d72425b5d35027 138-141
+src/webui.ts
+  s_ce354d199deb57::t_0e2725834970ff 426,436-440,443-449,451,453,455-458,466-472,474-475
+  s_ce354d199deb57::t_e1029a45e1ca05 576-577
+  s_ce354d199deb57::t_203b2570bb0da1 427-435,441-442,450,452,454,459-465,473
+src/ui/styles.css
+  s_ce354d199deb57::t_bf774d0e35c398 213-222
+docs/histories/2026-10/20261010-1602-clear-request-logs-button.md
+  s_ce354d199deb57::t_59c74b731c4d05 1,12,15,18-22,25-28,31-40,51-55,58
+  s_ce354d199deb57::t_bc5dc11a3687a4 2-11,13-14,16-17,23-24,29-30,41-50,56-57
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "80ee5b4cf697b6a252672b7b7c39b0d2c43c3d85",
+  "prompts": {},
+  "sessions": {
+    "s_ce354d199deb57": {
+      "agent_id": {
+        "tool": "codebuddy-cn",
+        "id": "df6875851de34b03bbd60ef793a2b48b",
+        "model": "space-bunny"
+      },
+      "human_author": "liutao <liutaotao@mytijian.com>"
+    }
+  }
+}
