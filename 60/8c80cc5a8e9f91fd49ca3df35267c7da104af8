@@ -1,0 +1,71 @@
+src/codebuddy/index.ts
+  s_ce354d199deb57::t_09fb52a597cb34 42-43
+  s_ce354d199deb57::t_2cf94b6164ac1c 56-110
+  s_ce354d199deb57::t_92db50d01198f4 148-149
+  s_ce354d199deb57::t_a6278bd858e891 321-322,325
+  s_ce354d199deb57::t_4bbc74dd74c4a3 384-386
+  s_ce354d199deb57::t_67ddb1231884d8 313-314,323-324,326-330
+docs/histories/2026-10/20261010-1433-codebuddy-upstream-retry.md
+  s_ce354d199deb57::t_9b9c2e9f439c26 1-55
+src/ui/ConfigPage.tsx
+  s_ce354d199deb57::t_791411815f3818 180-217
+  s_ce354d199deb57::t_9af2e786ce45da 316-337
+  s_ce354d199deb57::t_3a338ac8a48fc1 379,382,384-386,389-390,392-396,398-427
+  s_ce354d199deb57::t_b5567da180f4af 108-115,172
+  s_ce354d199deb57::t_81e24f1cf6360b 138-142
+  s_ce354d199deb57::t_5a4599f174d481 31-42,51,53-56
+  s_ce354d199deb57::t_0c4d60329a036e 237-238,241,246-247,249,251-258,260
+  s_ce354d199deb57::t_521162f1cb0c12 353-357
+  s_ce354d199deb57::t_f87b8b9bf118e2 29-30
+  s_ce354d199deb57::t_8831d1c005ffaa 105-107
+  s_ce354d199deb57::t_fe5b9a8d95a401 169-171
+  s_ce354d199deb57::t_e4275f28209fc0 173-175,177-179
+  s_ce354d199deb57::t_000a5957004bfe 218-220
+  s_ce354d199deb57::t_ddf9307846aa4e 235-236
+src/ui/styles.css
+  s_ce354d199deb57::t_f58bc6df322064 466-510
+  s_b1ed08fcbb5fee::t_3d85e5b1c4d6ca 950-959
+docs/histories/2026-10/20261010-1200-web-ui-model-list-ux.md
+  s_ce354d199deb57::t_2e29da752488db 1-50
+src/ui/LogsPage.tsx
+  s_b1ed08fcbb5fee::t_07b7464e894d5f 6-7,9
+  s_b1ed08fcbb5fee::t_04b50b40fd0311 131-190
+  s_b1ed08fcbb5fee::t_d3d1085d4a450e 283-284
+  s_b1ed08fcbb5fee::t_9aa79cac01db60 78-81
+  s_b1ed08fcbb5fee::t_f7de240dca42a4 358
+  s_b1ed08fcbb5fee::t_d88eef9f826e1e 325-351,355-357,359-365
+docs/histories/2026-10/20261010-1356-request-logging-toggle-in-logs-page.md
+  s_b1ed08fcbb5fee::t_44e81061cec7a6 1-50
+src/ui/i18n.tsx
+  s_ce354d199deb57::t_5436bf5a19c2f8 42-44,115-117
+  s_b1ed08fcbb5fee::t_d2a06d9c87d9fe 71
+  s_b1ed08fcbb5fee::t_1ba43e823b40f9 144
+test/codebuddy-gateway.test.ts
+  s_ce354d199deb57::t_4e43f94c389431 90-91
+  s_ce354d199deb57::t_891b3b3eb1a586 365-442
+  s_ce354d199deb57::t_35081965828173 145
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "608c80cc5a8e9f91fd49ca3df35267c7da104af8",
+  "prompts": {},
+  "sessions": {
+    "s_b1ed08fcbb5fee": {
+      "agent_id": {
+        "tool": "codebuddy-cn",
+        "id": "b62265244c7d47b4b4b7c612c786f98d",
+        "model": "deepseek-v4.1-flash"
+      },
+      "human_author": "liutao <liutaotao@mytijian.com>"
+    },
+    "s_ce354d199deb57": {
+      "agent_id": {
+        "tool": "codebuddy-cn",
+        "id": "df6875851de34b03bbd60ef793a2b48b",
+        "model": "space-bunny"
+      },
+      "human_author": "liutao <liutaotao@mytijian.com>"
+    }
+  }
+}
