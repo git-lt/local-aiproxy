@@ -1,0 +1,46 @@
+test/codebuddy-request.test.ts
+  s_ce354d199deb57::t_661b4827e726dd 5,9-10
+  s_ce354d199deb57::t_8198d5beb414d5 28-31
+  s_ce354d199deb57::t_5ea5f0c85d4381 246
+  s_ce354d199deb57::t_49a1e51fda19cd 251-252,265
+  s_ce354d199deb57::t_deee830b43a807 70,73
+  s_ce354d199deb57::t_3d3a8d5ebc0655 95,98
+  s_ce354d199deb57::t_89edd751065743 11
+docs/histories/2026-10/20261010-1545-codebuddy-channel-fingerprint-prompt.md
+  s_ce354d199deb57::t_237ba5bd7f53b6 1-62
+src/codebuddy/catalog.ts
+  s_ce354d199deb57::t_76240bf6bae8c5 232-234
+  s_ce354d199deb57::t_081e15357aad0e 5
+test/codebuddy-gateway.test.ts
+  s_ce354d199deb57::t_91bc5dbbb20704 174-175
+  s_ce354d199deb57::t_fd2b51f5263976 8-10
+  s_ce354d199deb57::t_dc6d513b743856 448-494,498-500,502-504
+  s_ce354d199deb57::t_a0ea05398746be 495-497,501
+src/codebuddy/request-context.ts
+  s_ce354d199deb57::t_08acc7e6b63ece 2
+  s_ce354d199deb57::t_b23cd6bd87c8c0 11-14
+src/codebuddy/request.ts
+  s_ce354d199deb57::t_0910f0837a174d 2
+  s_ce354d199deb57::t_d11894c97182cb 371,379
+  s_ce354d199deb57::t_c98342dc3f8635 370
+  s_ce354d199deb57::t_e0c022d9dfb8af 40-41,44,46
+  s_ce354d199deb57::t_d6b275b1346aba 355-356,359,363-369
+  s_ce354d199deb57::t_5e2f56c5266e9b 42-43,45,47-48
+  s_ce354d199deb57::t_a85c62c37b2697 362
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "e83c4f3f35810f469b2a0caca59e9e85fcdc0928",
+  "prompts": {},
+  "sessions": {
+    "s_ce354d199deb57": {
+      "agent_id": {
+        "tool": "codebuddy-cn",
+        "id": "df6875851de34b03bbd60ef793a2b48b",
+        "model": "space-bunny"
+      },
+      "human_author": "liutao <liutaotao@mytijian.com>"
+    }
+  }
+}
